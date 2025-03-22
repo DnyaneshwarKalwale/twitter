@@ -4,7 +4,7 @@ import { toast } from '@/hooks/use-toast';
 // API configuration
 const RAPID_API_KEY = '4738e035f2mshf219c943077bffap1d4150jsn085da35f2f75';
 const RAPID_API_HOST = 'twitter154.p.rapidapi.com';
-const BACKEND_API_URL = 'http://localhost:5000/api/tweets';
+const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
 /**
  * Fetches tweets for a given username
@@ -32,7 +32,8 @@ export const fetchUserTweets = async (username: string): Promise<Tweet[]> => {
     }
 
     // Then fetch tweets using the API endpoint with detailed parameters
-    const response = await fetch(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=50&includeReplies=false&includeFulltext=true&includeExtendedContent=true&includeQuoted=true&include_entities=true&includeAttachments=true&sort_by=recency&include_video_info=true&includeMedia=true`, {
+    // Increase limit to ensure we get all 50 tweets
+    const response = await fetch(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=100&includeReplies=false&includeFulltext=true&includeExtendedContent=true&includeQuoted=true&include_entities=true&includeAttachments=true&sort_by=recency&include_video_info=true&includeMedia=true`, {
       method: 'GET',
       headers: {
         'x-rapidapi-key': RAPID_API_KEY,
@@ -46,8 +47,17 @@ export const fetchUserTweets = async (username: string): Promise<Tweet[]> => {
 
     const data = await response.json();
     
+    // Check the raw response data
+    console.log('Raw API response:', {
+      resultsCount: data.results ? data.results.length : 0,
+      resultsPreview: data.results ? data.results.slice(0, 2) : [],
+      hasMore: !!data.continuation_token
+    });
+    
     // Fetch full tweet details for each tweet to ensure we have the complete content
     const processedTweets = processTweets(data);
+    
+    console.log(`API returned ${data.results ? data.results.length : 0} tweets, processed into ${processedTweets.length} tweets`);
     
     // For the first 5 tweets that are marked as long, fetch their full details
     const longTweets = processedTweets.filter(tweet => tweet.is_long).slice(0, 5);
@@ -62,7 +72,17 @@ export const fetchUserTweets = async (username: string): Promise<Tweet[]> => {
       }
     });
     
-    return Array.from(tweetMap.values());
+    const finalTweets = Array.from(tweetMap.values());
+    console.log(`Final tweet count: ${finalTweets.length}`);
+    
+    // Log the full list of tweet IDs to verify all are present
+    console.log('All tweet IDs:', finalTweets.map(t => t.id).join(', '));
+    
+    // Log how many tweets have thread_id set
+    const tweetsWithThreadId = finalTweets.filter(tweet => tweet.thread_id !== undefined).length;
+    console.log(`After processing, ${tweetsWithThreadId} tweets have thread_id set`);
+    
+    return finalTweets;
   } catch (error) {
     console.error('Error fetching tweets:', error);
     toast({
@@ -140,9 +160,32 @@ export const fetchTweetDetails = async (tweetId: string): Promise<Tweet | null> 
  */
 const processTweets = (response: any): Tweet[] => {
   if (!response.results || !Array.isArray(response.results)) {
+    console.log('No results found in response');
     return [];
   }
 
+  console.log(`Processing ${response.results.length} raw tweets`);
+
+  // Create a conversation map to better identify threads
+  const conversationMap = new Map();
+  response.results.forEach((tweet: any) => {
+    const conversationId = tweet.conversation_id || tweet.tweet_id;
+    if (!conversationMap.has(conversationId)) {
+      conversationMap.set(conversationId, []);
+    }
+    conversationMap.get(conversationId).push(tweet);
+  });
+
+  // Log conversation statistics
+  let multiTweetConversations = 0;
+  conversationMap.forEach((tweets, conversationId) => {
+    if (tweets.length > 1) {
+      multiTweetConversations++;
+    }
+  });
+  console.log(`Found ${conversationMap.size} conversations, ${multiTweetConversations} with multiple tweets`);
+
+  // Now process each tweet with thread identification
   const tweets = response.results.map((tweet: any) => {
     // Ensure we get the full text content
     const textContent = tweet.extended_text || tweet.extended_tweet?.full_text || tweet.text || '';
@@ -160,6 +203,10 @@ const processTweets = (response: any): Tweet[] => {
       ...(tweet.extended_entities?.media?.map((m: any) => m.media_url_https || m.video_info?.variants?.[0]?.url) || []),
       ...(tweet.entities?.media?.map((m: any) => m.media_url_https || m.video_info?.variants?.[0]?.url) || [])
     ].filter(Boolean);
+    
+    // Get conversation information to identify threads
+    const conversationId = tweet.conversation_id || tweet.tweet_id;
+    const isPartOfThread = conversationMap.get(conversationId)?.length > 1;
     
     // Specifically extract video content
     const videoInfo = tweet.extended_entities?.media?.find((m: any) => 
@@ -269,14 +316,18 @@ const processTweets = (response: any): Tweet[] => {
           };
         })
       }] : undefined,
-      conversation_id: tweet.conversation_id || tweet.tweet_id,
+      conversation_id: conversationId,
       in_reply_to_user_id: tweet.in_reply_to_user_id,
       is_long: textContent.length > 280 || Boolean(tweet.extended_text) || isLikelyTruncated || hasShowThreadIndicator,
+      thread_id: isPartOfThread ? conversationId : undefined,
     };
   });
 
-  // Group tweets into threads
-  return identifyThreads(tweets);
+  // Log how many tweets have thread_id set
+  const tweetsWithThreadId = tweets.filter(tweet => tweet.thread_id !== undefined).length;
+  console.log(`After processing, ${tweetsWithThreadId} tweets have thread_id set`);
+
+  return tweets;
 };
 
 /**
@@ -418,70 +469,43 @@ const processTweetDetails = (response: any): Tweet | null => {
 };
 
 /**
- * Identifies tweets that belong to the same thread
- */
-const identifyThreads = (tweets: Tweet[]): Tweet[] => {
-  const conversationMap = new Map<string, Tweet[]>();
-  
-  // Group tweets by conversation_id
-  tweets.forEach(tweet => {
-    const key = tweet.conversation_id;
-    if (!conversationMap.has(key)) {
-      conversationMap.set(key, []);
-    }
-    conversationMap.get(key)?.push(tweet);
-  });
-  
-  // Process each conversation
-  const processedTweets: Tweet[] = [];
-  
-  conversationMap.forEach((convTweets, conversationId) => {
-    // Sort tweets by creation date (oldest first)
-    convTweets.sort((a, b) => 
-      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
-    
-    // If there's only one tweet or tweets by different authors, they're not a thread
-    if (
-      convTweets.length <= 1 || 
-      !convTweets.every(t => t.author.id === convTweets[0].author.id)
-    ) {
-      processedTweets.push(...convTweets);
-      return;
-    }
-    
-    // Mark all tweets in this thread
-    const threadId = `thread-${conversationId}`;
-    convTweets.forEach(tweet => {
-      tweet.thread_id = threadId;
-    });
-    
-    processedTweets.push(...convTweets);
-  });
-  
-  return processedTweets;
-};
-
-/**
- * Groups tweets into threads
+ * Groups tweets into threads and individual tweets
  */
 export const groupThreads = (tweets: Tweet[]): (Tweet | Thread)[] => {
+  // Log initial count
+  console.log(`Starting groupThreads with ${tweets.length} tweets`);
+  
   const threadMap = new Map<string, Tweet[]>();
   const standaloneItems: (Tweet | Thread)[] = [];
   
-  // First pass: identify all thread tweets
+  // Count how many tweets have a thread_id
+  let threadsCount = 0;
   tweets.forEach(tweet => {
     if (tweet.thread_id) {
-      if (!threadMap.has(tweet.thread_id)) {
-        threadMap.set(tweet.thread_id, []);
+      threadsCount++;
+    }
+  });
+  console.log(`Found ${threadsCount} tweets with thread_id`);
+  
+  // First pass: identify all thread tweets
+  tweets.forEach(tweet => {
+    // For debugging, add this in case thread_id is undefined for all tweets
+    const threadId = tweet.thread_id || tweet.conversation_id;
+    if (threadId) {
+      if (!threadMap.has(threadId)) {
+        threadMap.set(threadId, []);
       }
-      threadMap.get(tweet.thread_id)?.push(tweet);
+      threadMap.get(threadId)?.push(tweet);
     } else {
       standaloneItems.push(tweet);
     }
   });
   
+  // Log thread map size
+  console.log(`Thread map has ${threadMap.size} potential threads`);
+  
   // Second pass: create Thread objects
+  let threadCount = 0;
   threadMap.forEach((threadTweets, threadId) => {
     if (threadTweets.length > 1) {
       // This is a valid thread with multiple tweets
@@ -489,11 +513,26 @@ export const groupThreads = (tweets: Tweet[]): (Tweet | Thread)[] => {
         id: threadId,
         tweets: threadTweets,
       });
+      threadCount++;
     } else if (threadTweets.length === 1) {
       // This is a single tweet incorrectly marked as a thread
       standaloneItems.push(threadTweets[0]);
     }
   });
+
+  console.log(`Grouped ${tweets.length} tweets into ${threadCount} threads and ${standaloneItems.length - threadCount} standalone tweets`);
+  
+  // Count total tweets in standaloneItems
+  let totalTweetsInStandaloneItems = 0;
+  standaloneItems.forEach(item => {
+    if ('tweets' in item) {
+      totalTweetsInStandaloneItems += item.tweets.length;
+    } else {
+      totalTweetsInStandaloneItems += 1;
+    }
+  });
+  
+  console.log(`Total tweets in result: ${totalTweetsInStandaloneItems} (should match original count: ${tweets.length})`);
   
   // Sort by newest first
   return standaloneItems.sort((a, b) => {

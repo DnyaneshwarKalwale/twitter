@@ -6,7 +6,7 @@ import { Loader2, Database, User, Calendar, Trash2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 
-const BACKEND_API_URL = 'http://localhost:5000/api/tweets';
+const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
 interface SavedUser {
   username: string;

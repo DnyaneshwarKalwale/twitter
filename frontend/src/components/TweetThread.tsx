@@ -19,7 +19,7 @@ const TweetThread: React.FC<TweetThreadProps> = ({
   onSelectToggle = () => {}, 
   onSelectThread = () => {}
 }) => {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   
   // Ensure thread has tweets array
   if (!thread || !thread.tweets || thread.tweets.length === 0) {
@@ -27,8 +27,12 @@ const TweetThread: React.FC<TweetThreadProps> = ({
     return null;
   }
   
-  const visibleTweets = expanded ? thread.tweets : thread.tweets.slice(0, 3);
-  const hasMoreTweets = thread.tweets.length > 3;
+  // Log thread info for debugging
+  console.log(`Thread ${thread.id} has ${thread.tweets.length} tweets`);
+  
+  // Always show all tweets in a thread
+  const visibleTweets = thread.tweets;
+  const hasMoreTweets = false; // No need to expand further
 
   const toggleExpand = () => {
     setExpanded(!expanded);
@@ -186,23 +190,6 @@ const TweetThread: React.FC<TweetThreadProps> = ({
           </div>
         ))}
       </div>
-      
-      {hasMoreTweets && (
-        <button 
-          onClick={toggleExpand} 
-          className="show-more-button mx-auto block mt-4 py-2 px-4 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
-        >
-          {expanded ? (
-            <span className="flex items-center justify-center">
-              Show less <ChevronUp className="h-4 w-4 ml-1" />
-            </span>
-          ) : (
-            <span className="flex items-center justify-center">
-              Show {thread.tweets.length - 3} more tweet{thread.tweets.length - 3 > 1 ? 's' : ''} <ChevronDown className="h-4 w-4 ml-1" />
-            </span>
-          )}
-        </button>
-      )}
     </article>
   );
 };

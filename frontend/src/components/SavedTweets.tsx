@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { formatDistanceToNow } from 'date-fns';
 
-const BACKEND_API_URL = 'http://localhost:5000/api/tweets';
+const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
 interface SavedTweetsProps {
   username?: string;

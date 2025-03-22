@@ -33,7 +33,7 @@ const Index = () => {
   const [pagination, setPagination] = useState<PaginationState>({
     currentPage: 1,
     totalItems: 0,
-    itemsPerPage: 10
+    itemsPerPage: 50
   });
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -106,16 +106,28 @@ const Index = () => {
     });
   }, [allItems, selectedCategory]);
 
-  // Update displayed items when filteredItems or pagination changes
+  // Update displayed items when filteredItems changes
   useEffect(() => {
-    const startIndex = (pagination.currentPage - 1) * pagination.itemsPerPage;
-    const endIndex = startIndex + pagination.itemsPerPage;
-    setDisplayedItems(filteredItems.slice(startIndex, endIndex));
+    // Skip pagination and display all items
+    setDisplayedItems(filteredItems);
+    
+    // Count how many actual tweets we're displaying
+    let displayedTweetCount = 0;
+    filteredItems.forEach(item => {
+      if ('tweets' in item) {
+        displayedTweetCount += item.tweets.length;
+      } else {
+        displayedTweetCount += 1;
+      }
+    });
+    
+    console.log(`Displaying all ${filteredItems.length} filtered items (${displayedTweetCount} total tweets)`);
+    
     setPagination(prev => ({
       ...prev,
       totalItems: filteredItems.length
     }));
-  }, [filteredItems, pagination.currentPage, pagination.itemsPerPage]);
+  }, [filteredItems]);
 
   // Reset to first page when category changes
   useEffect(() => {
@@ -159,11 +171,13 @@ const Index = () => {
     setPagination({
       currentPage: 1,
       totalItems: 0,
-      itemsPerPage: 10
+      itemsPerPage: 100 // Increase to ensure all tweets are shown
     });
     
     try {
       const tweets = await fetchUserTweets(username);
+      console.log(`Received ${tweets.length} tweets from API call`);
+      
       if (tweets.length === 0) {
         toast({
           title: 'No tweets found',
@@ -173,10 +187,28 @@ const Index = () => {
       }
       
       const groupedItems = groupThreads(tweets);
+      console.log(`After grouping, we have ${groupedItems.length} items (threads + individual tweets)`);
+      
+      // Count actual total tweets
+      let totalTweetCount = 0;
+      groupedItems.forEach(item => {
+        if ('tweets' in item) {
+          totalTweetCount += item.tweets.length;
+        } else {
+          totalTweetCount += 1;
+        }
+      });
+      
+      console.log(`Total tweet count across all items: ${totalTweetCount}`);
       setAllItems(groupedItems);
+      
+      // Show how many actual tweets we have vs. grouped items
+      console.log(`Fetched ${tweets.length} tweets, grouped into ${groupedItems.length} items`);
+      
       setPagination(prev => ({
         ...prev,
-        totalItems: groupedItems.length
+        totalItems: groupedItems.length,
+        itemsPerPage: groupedItems.length // Set to show all items on one page
       }));
       
       toast({
@@ -446,16 +478,7 @@ const Index = () => {
               ))}
             </div>
             
-            {filteredItems.length > pagination.itemsPerPage && (
-              <div className="mt-8">
-                <TweetPagination 
-                  currentPage={pagination.currentPage}
-                  totalItems={pagination.totalItems}
-                  itemsPerPage={pagination.itemsPerPage}
-                  onPageChange={handlePageChange}
-                />
-              </div>
-            )}
+            {/* Pagination has been removed since we now show all items */}
           </>
         )}
         
