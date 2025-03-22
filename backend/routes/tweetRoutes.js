@@ -11,7 +11,7 @@ const {
 
 const router = express.Router();
 
-// Get tweets for a Twitter username
+// Get tweets for a Twitter usernames
 router.get('/user/:username', getUserTweets);
 
 // Get all users who have saved tweets
