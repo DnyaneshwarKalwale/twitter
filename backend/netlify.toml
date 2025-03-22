@@ -1,0 +1,23 @@
+[build]
+  publish = "."
+  command = "echo 'Backend deployment'"
+
+# Specific redirects for backend API endpoints
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+# Exclude node_modules from deployment
+[build.processing]
+  skip_processing = true
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# Explicitly ignore node_modules in the deploy
+[[plugins]]
+  package = "@netlify/plugin-local-install-core"
+
+[plugins.inputs]
+  includePatterns = ["!node_modules/**", "!node_modules"] 
