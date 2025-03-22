@@ -33,7 +33,7 @@ const Index = () => {
   const [pagination, setPagination] = useState<PaginationState>({
     currentPage: 1,
     totalItems: 0,
-    itemsPerPage: 50
+    itemsPerPage: 10
   });
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -106,14 +106,17 @@ const Index = () => {
     });
   }, [allItems, selectedCategory]);
 
-  // Update displayed items when filteredItems changes
+  // Update displayed items when filteredItems or pagination changes
   useEffect(() => {
-    // Skip pagination and display all items
-    setDisplayedItems(filteredItems);
+    // Calculate start and end indices based on current page
+    const startIndex = (pagination.currentPage - 1) * pagination.itemsPerPage;
+    const endIndex = startIndex + pagination.itemsPerPage;
+    const itemsToDisplay = filteredItems.slice(startIndex, endIndex);
+    setDisplayedItems(itemsToDisplay);
     
     // Count how many actual tweets we're displaying
     let displayedTweetCount = 0;
-    filteredItems.forEach(item => {
+    itemsToDisplay.forEach(item => {
       if ('tweets' in item) {
         displayedTweetCount += item.tweets.length;
       } else {
@@ -121,13 +124,13 @@ const Index = () => {
       }
     });
     
-    console.log(`Displaying all ${filteredItems.length} filtered items (${displayedTweetCount} total tweets)`);
+    console.log(`Displaying ${itemsToDisplay.length} items on page ${pagination.currentPage} (${displayedTweetCount} tweets)`);
     
     setPagination(prev => ({
       ...prev,
       totalItems: filteredItems.length
     }));
-  }, [filteredItems]);
+  }, [filteredItems, pagination.currentPage, pagination.itemsPerPage]);
 
   // Reset to first page when category changes
   useEffect(() => {
@@ -171,7 +174,7 @@ const Index = () => {
     setPagination({
       currentPage: 1,
       totalItems: 0,
-      itemsPerPage: 100 // Increase to ensure all tweets are shown
+      itemsPerPage: 10
     });
     
     try {
@@ -202,13 +205,10 @@ const Index = () => {
       console.log(`Total tweet count across all items: ${totalTweetCount}`);
       setAllItems(groupedItems);
       
-      // Show how many actual tweets we have vs. grouped items
-      console.log(`Fetched ${tweets.length} tweets, grouped into ${groupedItems.length} items`);
-      
+      // Update pagination with the correct total items
       setPagination(prev => ({
         ...prev,
-        totalItems: groupedItems.length,
-        itemsPerPage: groupedItems.length // Set to show all items on one page
+        totalItems: groupedItems.length
       }));
       
       toast({
@@ -228,10 +228,15 @@ const Index = () => {
   };
 
   const handlePageChange = (page: number) => {
+    // Update current page
     setPagination(prev => ({
       ...prev,
       currentPage: page
     }));
+    
+    // Log page change
+    console.log(`Changing to page ${page}`);
+    
     // Scroll to top when page changes
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -457,6 +462,20 @@ const Index = () => {
           </div>
         ) : (
           <>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div>
+                <TweetCategories 
+                  selectedCategory={selectedCategory}
+                  onCategoryChange={setSelectedCategory}
+                  categoryCounts={categoryTweetCounts}
+                />
+              </div>
+              
+              <div className="text-sm text-muted-foreground">
+                Showing {((pagination.currentPage - 1) * pagination.itemsPerPage) + 1}-
+                {Math.min(pagination.currentPage * pagination.itemsPerPage, filteredItems.length)} of {filteredItems.length} items
+              </div>
+            </div>
             <div className="space-y-6">
               {displayedItems.map(item => (
                 'tweets' in item ? (
@@ -478,7 +497,16 @@ const Index = () => {
               ))}
             </div>
             
-            {/* Pagination has been removed since we now show all items */}
+            {filteredItems.length > pagination.itemsPerPage && (
+              <div className="mt-8">
+                <TweetPagination 
+                  currentPage={pagination.currentPage}
+                  totalItems={pagination.totalItems}
+                  itemsPerPage={pagination.itemsPerPage}
+                  onPageChange={handlePageChange}
+                />
+              </div>
+            )}
           </>
         )}
         
