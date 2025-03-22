@@ -1,0 +1,504 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import TweetCard from '@/components/TweetCard';
+import TweetThread from '@/components/TweetThread';
+import { Button } from '@/components/ui/button';
+import { Tweet, TweetCategory, Thread } from '@/utils/types';
+import { useToast } from '@/hooks/use-toast';
+import { Loader2, Database, Trash2, User, ArrowLeft, MessageSquare, FileText, Rows3, MessagesSquare } from 'lucide-react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { formatDistanceToNow } from 'date-fns';
+
+const BACKEND_API_URL = 'http://localhost:5000/api/tweets';
+
+interface SavedTweetsProps {
+  username?: string;
+}
+
+interface CategoryInfo {
+  label: string;
+  icon: React.ReactNode;
+  count: number;
+}
+
+// Helper function to convert Twitter API date to Date object
+const parseTwitterDate = (twitterDate: string): Date => {
+  // Twitter API date format: "Tue Feb 02 17:43:22 +0000 2021" or ISO format
+  if (twitterDate.includes('+0000')) {
+    return new Date(twitterDate);
+  }
+  // Handle ISO format or other formats
+  return new Date(twitterDate);
+};
+
+const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
+  const [savedTweets, setSavedTweets] = useState<Tweet[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState<Record<string, boolean>>({});
+  const [activeCategory, setActiveCategory] = useState<TweetCategory | 'all'>('all');
+  const { toast } = useToast();
+  const params = useParams<{ username?: string }>();
+  const userParam = params.username || username;
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    fetchSavedTweets();
+  }, [userParam]);
+
+  const fetchSavedTweets = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const endpoint = userParam 
+        ? `${BACKEND_API_URL}/saved/user/${userParam}` 
+        : `${BACKEND_API_URL}/saved`;
+      
+      const response = await fetch(endpoint);
+      
+      if (!response.ok) {
+        throw new Error(`Error: ${response.status}`);
+      }
+      
+      const data: ApiResponse = await response.json();
+      
+      // Sort tweets by created_at date in descending order (newest first)
+      const sortedTweets = data.data.sort((a, b) => {
+        const dateA = parseTwitterDate(a.created_at);
+        const dateB = parseTwitterDate(b.created_at);
+        return dateB.getTime() - dateA.getTime();
+      });
+      
+      setSavedTweets(sortedTweets);
+    } catch (error) {
+      console.error('Error fetching saved tweets:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch saved tweets',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [userParam, toast]);
+
+  const handleDeleteTweet = async (id: string) => {
+    setIsDeleting(prev => ({ ...prev, [id]: true }));
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/${id}`, {
+        method: 'DELETE',
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Error deleting tweet: ${response.status}`);
+      }
+      
+      setSavedTweets(prev => prev.filter(tweet => tweet.id !== id));
+      
+      toast({
+        title: 'Success',
+        description: 'Tweet removed from saved collection',
+      });
+    } catch (error) {
+      console.error('Error deleting tweet:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to delete saved tweet',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDeleting(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const handleDeleteThread = async (thread: Thread) => {
+    // Mark all tweets in the thread as deleting
+    const updatedIsDeleting = { ...isDeleting };
+    thread.tweets.forEach(tweet => {
+      updatedIsDeleting[tweet.id] = true;
+    });
+    setIsDeleting(updatedIsDeleting);
+    
+    try {
+      // Delete each tweet in the thread
+      const deletePromises = thread.tweets.map(tweet => 
+        fetch(`${BACKEND_API_URL}/${tweet.id}`, {
+          method: 'DELETE',
+        })
+      );
+      
+      // Wait for all delete operations to complete
+      const results = await Promise.all(deletePromises);
+      
+      // Check if any operations failed
+      if (results.some(response => !response.ok)) {
+        throw new Error("Some tweets could not be deleted");
+      }
+      
+      // Update state to remove the deleted tweets
+      setSavedTweets(prev => prev.filter(tweet => 
+        !thread.tweets.some(threadTweet => threadTweet.id === tweet.id)
+      ));
+      
+      toast({
+        title: 'Success',
+        description: `Thread with ${thread.tweets.length} tweets removed`,
+      });
+    } catch (error) {
+      console.error('Error deleting thread:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to delete thread completely',
+        variant: 'destructive',
+      });
+    } finally {
+      // Clear the deleting state for all tweets in the thread
+      const clearedIsDeleting = { ...isDeleting };
+      thread.tweets.forEach(tweet => {
+        clearedIsDeleting[tweet.id] = false;
+      });
+      setIsDeleting(clearedIsDeleting);
+    }
+  };
+
+  const handleBack = () => {
+    navigate('/saved'); // Go back to the users list
+  };
+
+  // Get avatar from the first tweet if available
+  const userAvatar = savedTweets.length > 0 ? savedTweets[0].author.profile_image_url : null;
+
+  // Group tweets into categories: normal, long, and threads
+  const { normalTweets, longTweets, threads } = useMemo(() => {
+    const normalTweets: Tweet[] = [];
+    const longTweets: Tweet[] = [];
+    const threadMap = new Map<string, Tweet[]>();
+    const processedTweetIds = new Set<string>(); // Track which tweets are already in threads
+    
+    // First, identify tweets with thread_id and group them
+    savedTweets.forEach(tweet => {
+      if (tweet.thread_id) {
+        const threadId = tweet.thread_id;
+        const existingThread = threadMap.get(threadId) || [];
+        existingThread.push(tweet);
+        threadMap.set(threadId, existingThread);
+        processedTweetIds.add(tweet.id);
+      }
+    });
+    
+    // Then look for conversations that should be threads
+    const conversationMap = new Map<string, Tweet[]>();
+    
+    // Group by conversation_id
+    savedTweets.forEach(tweet => {
+      if (!processedTweetIds.has(tweet.id) && tweet.conversation_id) {
+        const conversationId = tweet.conversation_id;
+        const existingConversation = conversationMap.get(conversationId) || [];
+        existingConversation.push(tweet);
+        conversationMap.set(conversationId, existingConversation);
+      }
+    });
+    
+    // Convert appropriate conversations to threads
+    conversationMap.forEach((tweets, conversationId) => {
+      if (tweets.length > 1) {
+        // Group tweets by author
+        const authorTweets = new Map<string, Tweet[]>();
+        
+        tweets.forEach(tweet => {
+          const authorId = tweet.author.id;
+          const authorThreadTweets = authorTweets.get(authorId) || [];
+          authorThreadTweets.push(tweet);
+          authorTweets.set(authorId, authorThreadTweets);
+        });
+        
+        // For each author with multiple tweets, create a thread
+        authorTweets.forEach((authorTweetGroup, authorId) => {
+          if (authorTweetGroup.length > 1) {
+            const threadId = `${conversationId}-${authorId}`;
+            threadMap.set(threadId, authorTweetGroup);
+            
+            // Mark these tweets as processed
+            authorTweetGroup.forEach(tweet => {
+              processedTweetIds.add(tweet.id);
+            });
+          }
+        });
+      }
+    });
+    
+    // Categorize remaining tweets as normal or long
+    savedTweets.forEach(tweet => {
+      if (!processedTweetIds.has(tweet.id)) {
+        if (tweet.is_long) {
+          longTweets.push(tweet);
+        } else {
+          normalTweets.push(tweet);
+        }
+      }
+    });
+    
+    // Build thread objects
+    const threads: Thread[] = Array.from(threadMap.entries())
+      .filter(([_, tweets]) => tweets.length > 1) // Only include actual threads with multiple tweets
+      .map(([threadId, tweets]) => {
+        // Sort tweets within the thread by created_at (chronological order)
+        const sortedTweets = tweets.sort((a, b) => {
+          const dateA = parseTwitterDate(a.created_at);
+          const dateB = parseTwitterDate(b.created_at);
+          return dateA.getTime() - dateB.getTime();
+        });
+        
+        // Use the newest tweet's info for the thread metadata
+        const newestTweet = sortedTweets[sortedTweets.length - 1];
+        
+        return {
+          id: threadId,
+          tweets: sortedTweets,
+          author: newestTweet.author,
+          created_at: newestTweet.created_at
+        };
+    });
+    
+    // Sort threads by their newest tweet's date (newest first)
+    threads.sort((a, b) => {
+      const dateA = parseTwitterDate(a.created_at || '');
+      const dateB = parseTwitterDate(b.created_at || '');
+      return dateB.getTime() - dateA.getTime();
+    });
+    
+    // Debug logging
+    console.log(`Found ${threads.length} threads after deduplication`);
+    
+    return { normalTweets, longTweets, threads };
+  }, [savedTweets]);
+
+  // Determine which content to display based on active category
+  const { displayThreads, displayTweets } = useMemo(() => {
+    let displayThreads: Thread[] = [];
+    let displayTweets: Tweet[] = [];
+    
+    if (activeCategory === 'all') {
+      displayThreads = threads;
+      displayTweets = normalTweets.concat(longTweets);
+    } else if (activeCategory === 'thread') {
+      displayThreads = threads;
+    } else if (activeCategory === 'long') {
+      displayTweets = longTweets;
+    } else { // 'normal'
+      displayTweets = normalTweets;
+    }
+    
+    return { displayThreads, displayTweets };
+  }, [threads, normalTweets, longTweets, activeCategory]);
+
+  // Format tweet date for display
+  const formatTweetDate = (dateString: string): string => {
+    try {
+      const date = parseTwitterDate(dateString);
+      return formatDistanceToNow(date, { addSuffix: true });
+    } catch (error) {
+      return dateString; // Fallback to original string if parsing fails
+    }
+  };
+
+  // Generate category info for tabs
+  const categories: Record<string, CategoryInfo> = useMemo(() => {
+    return {
+      all: {
+        label: 'All Tweets',
+        icon: <Rows3 className="h-4 w-4" />,
+        count: savedTweets.length
+      },
+      normal: {
+        label: 'Normal',
+        icon: <MessageSquare className="h-4 w-4" />,
+        count: normalTweets.length
+      },
+      long: {
+        label: 'Long',
+        icon: <FileText className="h-4 w-4" />,
+        count: longTweets.length
+      },
+      thread: {
+        label: 'Threads',
+        icon: <MessagesSquare className="h-4 w-4" />,
+        count: threads.reduce((acc, thread) => acc + thread.tweets.length, 0)
+      }
+    };
+  }, [savedTweets, normalTweets, longTweets, threads]);
+
+  // Debug logging - remove in production
+  useEffect(() => {
+    if (threads.length > 0) {
+      console.log(`Found ${threads.length} threads with ${categories.thread.count} total tweets`);
+      threads.forEach((thread, i) => {
+        console.log(`Thread ${i+1}: ${thread.id} has ${thread.tweets.length} tweets`);
+      });
+    }
+  }, [threads, categories.thread.count]);
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="p-4 sm:p-6 rounded-lg bg-card border mb-4 sm:mb-8">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center space-x-3 sm:space-x-4">
+            {userAvatar ? (
+              <img 
+                src={userAvatar} 
+                alt={userParam || "User"} 
+                className="w-12 h-12 sm:w-16 sm:h-16 rounded-full object-cover"
+                loading="lazy"
+                onError={(e) => {
+                  e.currentTarget.onerror = null;
+                  e.currentTarget.src = 'https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png';
+                }}
+              />
+            ) : (
+              <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-muted flex items-center justify-center">
+                <User className="h-6 w-6 sm:h-8 sm:w-8 text-muted-foreground" />
+              </div>
+            )}
+            
+            <div>
+              <h2 className="text-xl sm:text-2xl font-bold mb-0 sm:mb-1 text-primary truncate max-w-[200px] sm:max-w-none">
+                @{userParam}
+              </h2>
+              <p className="text-sm sm:text-base text-muted-foreground">
+                {savedTweets.length} saved {savedTweets.length === 1 ? 'tweet' : 'tweets'}
+              </p>
+            </div>
+          </div>
+          
+          <Button 
+            onClick={handleBack}
+            variant="outline"
+            size="sm"
+            className="flex items-center gap-1 w-full sm:w-auto justify-center"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>Back to Users</span>
+          </Button>
+        </div>
+      </div>
+      
+      {isLoading ? (
+        <div className="flex justify-center items-center py-10 sm:py-20">
+          <div className="text-center">
+            <Loader2 className="h-8 w-8 sm:h-10 sm:w-10 animate-spin mx-auto mb-3 sm:mb-4 text-twitter" />
+            <p className="text-sm sm:text-base text-muted-foreground">Loading saved tweets...</p>
+          </div>
+        </div>
+      ) : savedTweets.length === 0 ? (
+        <div className="text-center py-8 sm:py-12 border border-dashed rounded-lg">
+          <Database className="h-8 w-8 sm:h-12 sm:w-12 mx-auto mb-3 sm:mb-4 text-muted-foreground/60" />
+          <h3 className="text-base sm:text-lg font-medium mb-1">No saved tweets</h3>
+          <p className="text-sm sm:text-base text-muted-foreground px-4">
+            {userParam 
+              ? `${userParam} hasn't saved any tweets yet.`
+              : 'Saved tweets will appear here. Go to search and select tweets to save.'}
+          </p>
+        </div>
+      ) : (
+        <>
+          <Tabs 
+            defaultValue="all" 
+            value={activeCategory}
+            onValueChange={(value) => setActiveCategory(value as TweetCategory | 'all')}
+            className="w-full"
+          >
+            <TabsList className="grid grid-cols-4 mb-4 sm:mb-6">
+              {Object.entries(categories).map(([key, category]) => (
+                <TabsTrigger key={key} value={key} className="flex items-center gap-1 sm:gap-2 text-xs sm:text-sm py-1 sm:py-2">
+                  {category.icon}
+                  <span className="hidden sm:inline">{category.label}</span>
+                  <Badge variant="outline" className="ml-0 sm:ml-1 text-xs">
+                    {category.count}
+                  </Badge>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+
+            <TabsContent value={activeCategory} className="mt-0">
+              {(activeCategory === 'thread' && displayThreads.length === 0) || 
+               (activeCategory !== 'thread' && displayTweets.length === 0 && 
+                (activeCategory === 'all' ? displayThreads.length === 0 : true)) ? (
+                <div className="text-center py-8 sm:py-12 border border-dashed rounded-lg">
+                  <Database className="h-8 w-8 sm:h-12 sm:w-12 mx-auto mb-3 sm:mb-4 text-muted-foreground/60" />
+                  <h3 className="text-base sm:text-lg font-medium mb-1">No {activeCategory === 'all' ? 'saved' : activeCategory} tweets</h3>
+                  <p className="text-sm sm:text-base text-muted-foreground">
+                    {activeCategory === 'thread' 
+                      ? `No thread tweets found for ${userParam || 'this user'}.` 
+                      : `No ${activeCategory} tweets found in this category.`}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Always show threads first, for all categories except when specifically filtering for non-thread tweets */}
+                  {(activeCategory === 'all' || activeCategory === 'thread') && displayThreads.length > 0 && (
+                    <div className="mb-4">
+                      {activeCategory === 'all' && displayThreads.length > 0 && (
+                        <h3 className="text-lg font-medium mb-3">Thread Tweets</h3>
+                      )}
+                      {displayThreads.map(thread => (
+                        <div key={thread.id} className="relative group mb-4">
+                          <TweetThread 
+                            thread={thread} 
+                            selectedTweets={new Set()} 
+                            onSelectToggle={() => {}} 
+                            onSelectThread={() => {}}
+                          />
+                          <Button
+                            className="absolute top-2 right-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                            size="icon"
+                            variant="destructive"
+                            onClick={() => handleDeleteThread(thread)}
+                            disabled={thread.tweets.some(tweet => isDeleting[tweet.id])}
+                          >
+                            {thread.tweets.some(tweet => isDeleting[tweet.id]) ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {/* Display individual tweets if any */}
+                  {displayTweets.length > 0 && (
+                    <div>
+                      {activeCategory === 'all' && displayThreads.length > 0 && (
+                        <h3 className="text-lg font-medium mb-3">Individual Tweets</h3>
+                      )}
+                      {displayTweets.map(tweet => (
+                        <div key={tweet.id} className="relative group mb-4">
+                          <TweetCard tweet={tweet} onSelectToggle={() => {}} isSelected={false} />
+                          <Button
+                            className="absolute top-2 right-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                            size="icon"
+                            variant="destructive"
+                            onClick={() => handleDeleteTweet(tweet.id)}
+                            disabled={isDeleting[tweet.id]}
+                          >
+                            {isDeleting[tweet.id] ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </>
+      )}
+    </div>
+  );
+};
+
+export default SavedTweets; 
