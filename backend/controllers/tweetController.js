@@ -63,7 +63,7 @@ exports.getUserTweets = async (req, res) => {
 // Save selected tweets to the database
 exports.saveTweets = async (req, res) => {
   try {
-    const { tweets, username } = req.body;
+    const { tweets, username, options = {} } = req.body;
     
     if (!tweets || !Array.isArray(tweets) || tweets.length === 0) {
       return res.status(400).json({
@@ -73,10 +73,93 @@ exports.saveTweets = async (req, res) => {
     }
 
     const savedTweets = [];
+    const skippedTweets = [];
     const saveUsername = username || 'anonymous';
     
-    // Save each tweet, using upsert to avoid duplicates
-    for (const tweet of tweets) {
+    // Extract options with defaults
+    const preserveExisting = options.preserveExisting === true;
+    const skipDuplicates = options.skipDuplicates === true;
+    const preserveThreadOrder = options.preserveThreadOrder === true;
+    
+    // Group tweets by thread if preserveThreadOrder is true
+    let tweetsToProcess = tweets;
+    if (preserveThreadOrder) {
+      // Organize tweets into thread groups
+      const threadGroups = {};
+      
+      // First pass: group tweets by thread_id
+      tweets.forEach(tweet => {
+        if (tweet.thread_id) {
+          if (!threadGroups[tweet.thread_id]) {
+            threadGroups[tweet.thread_id] = [];
+          }
+          threadGroups[tweet.thread_id].push(tweet);
+        }
+      });
+      
+      // Second pass: sort each thread by creation date
+      Object.keys(threadGroups).forEach(threadId => {
+        threadGroups[threadId].sort((a, b) => {
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        });
+        
+        // Add thread_index to each tweet for proper ordering
+        threadGroups[threadId].forEach((tweet, index) => {
+          tweet.thread_index = index;
+        });
+      });
+      
+      // Create a new tweets array with all tweets that have thread_id
+      // in the proper order, followed by standalone tweets
+      tweetsToProcess = [];
+      
+      // First add all thread tweets in proper order
+      Object.values(threadGroups).forEach(threadTweets => {
+        tweetsToProcess.push(...threadTweets);
+      });
+      
+      // Then add standalone tweets that don't have a thread_id
+      tweets.forEach(tweet => {
+        if (!tweet.thread_id) {
+          tweetsToProcess.push(tweet);
+        }
+      });
+      
+      console.log(`Processed ${tweetsToProcess.length} tweets for saving, with thread ordering applied`);
+    }
+    
+    // Save each tweet
+    for (const tweet of tweetsToProcess) {
+      // Check if tweet already exists
+      const existingTweet = await Tweet.findOne({ id: tweet.id });
+      
+      // Handle duplicate tweets based on options
+      if (existingTweet) {
+        if (skipDuplicates) {
+          // Skip this tweet if it's a duplicate and we're skipping duplicates
+          skippedTweets.push(existingTweet);
+          continue;
+        } else if (preserveExisting) {
+          // If we're preserving existing tweets, only update the savedAt time
+          // and thread ordering if provided
+          const updateFields = { savedAt: new Date() };
+          
+          // Update thread ordering information if available
+          if (preserveThreadOrder && tweet.thread_id) {
+            updateFields.thread_index = tweet.thread_index;
+          }
+          
+          const updatedTweet = await Tweet.findOneAndUpdate(
+            { id: tweet.id },
+            updateFields,
+            { new: true }
+          );
+          savedTweets.push(updatedTweet);
+          continue;
+        }
+      }
+      
+      // If not skipped as a duplicate, save the tweet
       const tweetToSave = {
         ...tweet,
         savedBy: saveUsername,
@@ -94,6 +177,7 @@ exports.saveTweets = async (req, res) => {
     res.status(201).json({
       success: true,
       count: savedTweets.length,
+      skippedCount: skippedTweets.length,
       data: savedTweets
     });
   } catch (error) {
@@ -109,12 +193,60 @@ exports.saveTweets = async (req, res) => {
 // Get all saved tweets
 exports.getSavedTweets = async (req, res) => {
   try {
-    const tweets = await Tweet.find().sort({ created_at: -1 });
+    // First get all tweets
+    const allTweets = await Tweet.find();
+    
+    // Group by thread_id and maintain order within threads
+    const threadMap = new Map();
+    const standaloneItems = [];
+    
+    // First pass: organize tweets into threads
+    allTweets.forEach(tweet => {
+      if (tweet.thread_id) {
+        if (!threadMap.has(tweet.thread_id)) {
+          threadMap.set(tweet.thread_id, []);
+        }
+        threadMap.get(tweet.thread_id).push(tweet);
+      } else {
+        standaloneItems.push(tweet);
+      }
+    });
+    
+    // Second pass: sort tweets within each thread
+    const threads = [];
+    threadMap.forEach((tweets, threadId) => {
+      // Sort by thread_index if available, otherwise by created_at
+      tweets.sort((a, b) => {
+        // If both tweets have thread_index, use that for sorting
+        if (a.thread_index !== undefined && b.thread_index !== undefined) {
+          return a.thread_index - b.thread_index;
+        }
+        // Otherwise fall back to created_at date
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      });
+      
+      if (tweets.length > 0) {
+        // Add each thread with its sorted tweets
+        threads.push({
+          id: threadId,
+          tweets: tweets,
+          savedAt: tweets[0].savedAt,  // Use the first tweet's savedAt time for the thread
+          created_at: tweets[0].created_at // Use the first tweet's created_at for sorting
+        });
+      }
+    });
+    
+    // Combine standalone tweets and threads, sorted by savedAt (newest first)
+    const result = [...standaloneItems, ...threads].sort((a, b) => {
+      const dateA = new Date(a.savedAt || a.created_at).getTime();
+      const dateB = new Date(b.savedAt || b.created_at).getTime();
+      return dateB - dateA; // Newest first
+    });
     
     res.status(200).json({
       success: true,
-      count: tweets.length,
-      data: tweets
+      count: result.length,
+      data: result
     });
   } catch (error) {
     console.error('Error getting saved tweets:', error);
@@ -154,30 +286,71 @@ exports.deleteTweet = async (req, res) => {
   }
 };
 
-// Get saved tweets by username
+// Get saved tweets by specific user
 exports.getSavedTweetsByUser = async (req, res) => {
   try {
     const { username } = req.params;
     
-    if (!username) {
-      return res.status(400).json({
-        success: false,
-        message: 'Username is required'
-      });
-    }
+    // First get all tweets saved by this user
+    const allTweets = await Tweet.find({ savedBy: username });
     
-    const tweets = await Tweet.find({ savedBy: username }).sort({ savedAt: -1 });
+    // Group by thread_id and maintain order within threads
+    const threadMap = new Map();
+    const standaloneItems = [];
+    
+    // First pass: organize tweets into threads
+    allTweets.forEach(tweet => {
+      if (tweet.thread_id) {
+        if (!threadMap.has(tweet.thread_id)) {
+          threadMap.set(tweet.thread_id, []);
+        }
+        threadMap.get(tweet.thread_id).push(tweet);
+      } else {
+        standaloneItems.push(tweet);
+      }
+    });
+    
+    // Second pass: sort tweets within each thread
+    const threads = [];
+    threadMap.forEach((tweets, threadId) => {
+      // Sort by thread_index if available, otherwise by created_at
+      tweets.sort((a, b) => {
+        // If both tweets have thread_index, use that for sorting
+        if (a.thread_index !== undefined && b.thread_index !== undefined) {
+          return a.thread_index - b.thread_index;
+        }
+        // Otherwise fall back to created_at date
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      });
+      
+      if (tweets.length > 0) {
+        // Add each thread with its sorted tweets
+        threads.push({
+          id: threadId,
+          tweets: tweets,
+          savedAt: tweets[0].savedAt,  // Use the first tweet's savedAt time for the thread
+          created_at: tweets[0].created_at // Use the first tweet's created_at for sorting
+        });
+      }
+    });
+    
+    // Combine standalone tweets and threads, sorted by savedAt (newest first)
+    const result = [...standaloneItems, ...threads].sort((a, b) => {
+      const dateA = new Date(a.savedAt || a.created_at).getTime();
+      const dateB = new Date(b.savedAt || b.created_at).getTime();
+      return dateB - dateA; // Newest first
+    });
     
     res.status(200).json({
       success: true,
-      count: tweets.length,
-      data: tweets
+      count: result.length,
+      data: result
     });
   } catch (error) {
-    console.error('Error getting saved tweets by user:', error);
+    console.error('Error getting saved tweets for user:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to get saved tweets',
+      message: `Failed to get saved tweets for user ${req.params.username}`,
       error: error.message
     });
   }

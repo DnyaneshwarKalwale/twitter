@@ -58,6 +58,7 @@ const TweetSchema = new mongoose.Schema({
   }],
   conversation_id: String,
   in_reply_to_user_id: String,
+  in_reply_to_tweet_id: String,
   media: [{
     media_key: String,
     type: {
@@ -72,6 +73,7 @@ const TweetSchema = new mongoose.Schema({
     height: Number
   }],
   thread_id: String,
+  thread_index: Number,
   is_long: Boolean,
   category: {
     type: String,
