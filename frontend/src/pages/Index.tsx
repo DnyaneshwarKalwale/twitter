@@ -464,11 +464,9 @@ const Index = () => {
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <div>
-                <TweetCategories 
-                  selectedCategory={selectedCategory}
-                  onCategoryChange={setSelectedCategory}
-                  categoryCounts={categoryTweetCounts}
-                />
+                <div className="text-sm text-muted-foreground">
+                  {filteredItems.length} {selectedCategory !== 'all' ? selectedCategory : ''} items
+                </div>
               </div>
               
               <div className="text-sm text-muted-foreground">

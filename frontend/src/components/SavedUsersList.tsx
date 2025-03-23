@@ -162,7 +162,7 @@ const SavedUsersList: React.FC = () => {
                     )}
                     
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-bold text-base sm:text-lg text-primary truncate">@{user.username}</h3>
+                      <h3 className="font-bold text-base sm:text-lg text-foreground truncate">@{user.username}</h3>
                       <div className="flex flex-col sm:flex-row sm:items-center text-xs sm:text-sm text-muted-foreground">
                         <span className="mr-0 sm:mr-3">{user.tweetCount} tweets</span>
                         {user.lastSaved?.savedAt && (

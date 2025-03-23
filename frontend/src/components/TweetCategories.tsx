@@ -6,14 +6,19 @@ import { MessagesSquare, Layers, Text, ListFilter } from 'lucide-react';
 interface TweetCategoriesProps {
   selectedCategory: TweetCategory;
   onCategoryChange: (category: TweetCategory) => void;
-  tweetCounts: Record<TweetCategory, number>;
+  tweetCounts?: Record<TweetCategory, number>;
+  categoryCounts?: Record<TweetCategory, number>; // Support both prop names
 }
 
 const TweetCategories: React.FC<TweetCategoriesProps> = ({ 
   selectedCategory, 
   onCategoryChange,
-  tweetCounts
+  tweetCounts = {},
+  categoryCounts = {}
 }) => {
+  // Use either tweetCounts or categoryCounts, with a fallback to an empty object
+  const counts = Object.keys(tweetCounts).length > 0 ? tweetCounts : categoryCounts;
+  
   const categories: CategoryOption[] = [
     { value: 'all', label: 'All Tweets', icon: <ListFilter className="h-4 w-4" /> },
     { value: 'normal', label: 'Regular', icon: <Text className="h-4 w-4" /> },
@@ -34,7 +39,7 @@ const TweetCategories: React.FC<TweetCategoriesProps> = ({
               {category.icon}
               <span>{category.label}</span>
               <span className="ml-1 rounded-full bg-muted px-1 sm:px-2 py-0.5 text-xs">
-                {tweetCounts[category.value] || 0}
+                {counts && counts[category.value] ? counts[category.value] : 0}
               </span>
             </TabsTrigger>
           ))}

@@ -1,42 +1,38 @@
 export interface Tweet {
   id: string;
+  author: User;
   text: string;
+  extended_text?: string;
   full_text?: string;
   created_at: string;
-  public_metrics: {
-    retweet_count: number;
-    reply_count: number;
-    like_count: number;
-    quote_count: number;
-  };
-  author: {
-    id: string;
-    name: string;
-    username: string;
-    profile_image_url: string;
-  };
-  attachments?: {
-    media_keys: string[];
-  };
-  referenced_tweets?: {
-    type: 'replied_to' | 'retweeted' | 'quoted';
-    id: string;
-    text?: string;
-    author?: {
-      name?: string;
-      username?: string;
-      profile_image_url?: string;
-    };
+  entities?: {
     media?: Media[];
-  }[];
-  conversation_id: string;
-  in_reply_to_user_id?: string;
+    mentions?: Mention[];
+    hashtags?: Hashtag[];
+    urls?: Url[];
+  };
+  quoted_tweet?: Tweet;
   media?: Media[];
+  quoted_status?: Tweet;
+  in_reply_to_status_id?: string;
+  in_reply_to_user_id?: string;
+  in_reply_to_screen_name?: string;
+  in_reply_to_tweet_id?: string;
+  is_quoted?: boolean;
+  is_retweet?: boolean;
+  is_reply?: boolean;
+  reply_count?: number;
+  retweet_count?: number;
+  favorite_count?: number;
+  quote_count?: number;
+  conversation_id?: string;
   thread_id?: string;
+  thread_position?: number; // Position in thread based on creation time
+  thread_index?: number;    // Position in thread for display ordering
   is_long?: boolean;
-  category?: TweetCategory;
+  has_media?: boolean;
+  savedAt?: Date | string;
   savedBy?: string;
-  savedAt?: string;
 }
 
 export interface Media {
@@ -61,6 +57,7 @@ export interface Thread {
   };
   created_at?: string;
   isSelected?: boolean;
+  savedAt?: Date | string;
 }
 
 export interface TwitterUser {
