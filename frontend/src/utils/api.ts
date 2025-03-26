@@ -307,6 +307,13 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
             // Skip if already seen
             if (uniqueReplyIds.has(t.id)) return false;
             
+            // Skip replies that mention other users (exclude tweets that start with @)
+            const tweetText = t.full_text || t.text || '';
+            if (tweetText.match(/^@[a-zA-Z0-9_]+/) && !tweetText.startsWith(`@${username}`)) {
+              console.log(`Skipping reply ${t.id} because it mentions another user: "${tweetText.substring(0, 30)}..."`);
+              return false;
+            }
+            
             // Include in results and mark as processed
             uniqueReplyIds.add(t.id);
             return true;
@@ -347,7 +354,7 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
       
       // Delay between pages is still needed but can be shorter
       await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
+  } catch (error) {
       console.error(`Error fetching replies for tweet ${tweetId} (attempt ${attempts+1}):`, error);
       attempts++;
       
@@ -413,7 +420,20 @@ export const fetchUserTweets = async (username: string, options?: {
     
     // Process and filter tweets by author
     let allTweets = processTweets(initialData)
-      .filter(tweet => tweet.author.username.toLowerCase() === username.toLowerCase());
+      .filter(tweet => {
+        // Check if it's by the author
+        const isAuthor = tweet.author.username.toLowerCase() === username.toLowerCase();
+        if (!isAuthor) return false;
+        
+        // Skip tweets that mention other users (exclude tweets that start with @)
+        const tweetText = tweet.full_text || tweet.text || '';
+        if (tweetText.match(/^@[a-zA-Z0-9_]+/) && !tweetText.startsWith(`@${username}`)) {
+          console.log(`Skipping tweet ${tweet.id} because it mentions another user: "${tweetText.substring(0, 30)}..."`);
+          return false;
+        }
+        
+        return true;
+      });
 
     console.log(`Found ${allTweets.length} tweets in initial fetch for ${username}`);
 
@@ -474,11 +494,17 @@ export const fetchUserTweets = async (username: string, options?: {
             const isAuthor = tweet.author.username.toLowerCase() === username.toLowerCase();
             const isUnique = !uniqueTweetIds.has(tweet.id);
             
-            if (isAuthor && isUnique) {
-              uniqueTweetIds.add(tweet.id);
-              return true;
+            if (!isAuthor || !isUnique) return false;
+            
+            // Skip tweets that mention other users (exclude tweets that start with @)
+            const tweetText = tweet.full_text || tweet.text || '';
+            if (tweetText.match(/^@[a-zA-Z0-9_]+/) && !tweetText.startsWith(`@${username}`)) {
+              console.log(`Skipping tweet ${tweet.id} because it mentions another user: "${tweetText.substring(0, 30)}..."`);
+              return false;
             }
-            return false;
+            
+            uniqueTweetIds.add(tweet.id);
+            return true;
           });
         
         console.log(`Found ${additionalTweets.length} new tweets in continuation ${continuationCount + 1}`);
@@ -910,9 +936,9 @@ export const saveSelectedTweets = async (tweets: Tweet[], username: string = 'an
     });
     
     // Sort tweets within each thread by thread_position or creation date
-    threadMap.forEach((threadTweets, threadId) => {
+  threadMap.forEach((threadTweets, threadId) => {
       if (threadTweets.length > 1) {
-        threadTweets.sort((a, b) => {
+    threadTweets.sort((a, b) => {
           // First by thread position if available
           if (a.thread_position !== undefined && b.thread_position !== undefined) {
             return a.thread_position - b.thread_position;
@@ -945,10 +971,10 @@ export const saveSelectedTweets = async (tweets: Tweet[], username: string = 'an
     // Ensure all tweets have the necessary properties
     const processedTweets = orderedTweets.map(tweet => {
       // Make sure thread information is preserved
-      return {
-        ...tweet,
+        return {
+          ...tweet,
         savedAt: new Date().toISOString()
-      };
+        };
     });
     
     // Make the API request
