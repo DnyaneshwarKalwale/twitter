@@ -72,55 +72,97 @@ exports.saveTweets = async (req, res) => {
       });
     }
 
+    // Log the incoming request
+    console.log(`Saving ${tweets.length} tweets for user ${username || 'anonymous'}`);
+    console.log('Save options:', options);
+
     const savedTweets = [];
     const skippedTweets = [];
     const saveUsername = username || 'anonymous';
     
     // Extract options with defaults
-    const preserveExisting = options.preserveExisting === true;
-    const skipDuplicates = options.skipDuplicates === true;
-    const preserveThreadOrder = options.preserveThreadOrder === true;
+    const preserveExisting = options.preserveExisting !== false; // Default to true
+    const skipDuplicates = options.skipDuplicates !== false; // Default to true
+    const preserveThreadOrder = options.preserveThreadOrder !== false; // Default to true
+    
+    // Verify all tweets have the essential fields
+    const verifiedTweets = tweets.filter(tweet => {
+      const hasRequiredFields = tweet && tweet.id && (tweet.text || tweet.full_text) && tweet.created_at;
+      if (!hasRequiredFields) {
+        console.warn('Skipping tweet with missing required fields:', 
+          tweet ? tweet.id : 'undefined tweet');
+      }
+      return hasRequiredFields;
+    });
+    
+    if (verifiedTweets.length < tweets.length) {
+      console.warn(`Filtered out ${tweets.length - verifiedTweets.length} tweets with missing required fields`);
+    }
     
     // Group tweets by thread if preserveThreadOrder is true
-    let tweetsToProcess = tweets;
+    let tweetsToProcess = verifiedTweets;
+    
     if (preserveThreadOrder) {
-      // Organize tweets into thread groups
+      // Organize tweets into thread groups - by thread_id or conversation_id
       const threadGroups = {};
       
-      // First pass: group tweets by thread_id
-      tweets.forEach(tweet => {
-        if (tweet.thread_id) {
-          if (!threadGroups[tweet.thread_id]) {
-            threadGroups[tweet.thread_id] = [];
+      // First pass: group tweets by thread_id or conversation_id
+      verifiedTweets.forEach(tweet => {
+        const threadId = tweet.thread_id || tweet.conversation_id;
+        if (threadId) {
+          if (!threadGroups[threadId]) {
+            threadGroups[threadId] = [];
           }
-          threadGroups[tweet.thread_id].push(tweet);
+          threadGroups[threadId].push(tweet);
         }
       });
       
-      // Second pass: sort each thread by creation date
+      // Second pass: sort each thread by thread_position, thread_index, or creation date
       Object.keys(threadGroups).forEach(threadId => {
         threadGroups[threadId].sort((a, b) => {
+          // First by thread_position if available
+          if (a.thread_position !== undefined && b.thread_position !== undefined) {
+            return a.thread_position - b.thread_position;
+          }
+          
+          // Then by thread_index if available
+          if (a.thread_index !== undefined && b.thread_index !== undefined) {
+            return a.thread_index - b.thread_index;
+          }
+          
+          // Finally by creation date
           return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
         });
         
-        // Add thread_index to each tweet for proper ordering
+        // Add or update thread_index to each tweet for proper ordering
         threadGroups[threadId].forEach((tweet, index) => {
           tweet.thread_index = index;
+          
+          // Ensure consistent thread_id/conversation_id
+          tweet.thread_id = tweet.thread_id || threadId;
+          tweet.conversation_id = tweet.conversation_id || threadId;
+          
+          // Mark if this is the root tweet (first in thread)
+          if (index === 0) {
+            tweet.is_root_tweet = true;
+          }
         });
       });
       
-      // Create a new tweets array with all tweets that have thread_id
-      // in the proper order, followed by standalone tweets
+      // Create a new tweets array with all tweets in threads in proper order,
+      // followed by standalone tweets
       tweetsToProcess = [];
       
       // First add all thread tweets in proper order
       Object.values(threadGroups).forEach(threadTweets => {
-        tweetsToProcess.push(...threadTweets);
+        if (threadTweets.length > 0) {
+          tweetsToProcess.push(...threadTweets);
+        }
       });
       
-      // Then add standalone tweets that don't have a thread_id
-      tweets.forEach(tweet => {
-        if (!tweet.thread_id) {
+      // Then add standalone tweets that don't have a thread_id or conversation_id
+      verifiedTweets.forEach(tweet => {
+        if (!tweet.thread_id && !tweet.conversation_id) {
           tweetsToProcess.push(tweet);
         }
       });
@@ -138,16 +180,27 @@ exports.saveTweets = async (req, res) => {
         if (skipDuplicates) {
           // Skip this tweet if it's a duplicate and we're skipping duplicates
           skippedTweets.push(existingTweet);
+          console.log(`Skipping duplicate tweet ${tweet.id}`);
           continue;
         } else if (preserveExisting) {
-          // If we're preserving existing tweets, only update the savedAt time
-          // and thread ordering if provided
-          const updateFields = { savedAt: new Date() };
+          // If we're preserving existing tweets, update with new metadata
+          // while keeping existing content
+          const updateFields = { 
+            savedAt: new Date(),
+            // Thread metadata
+            thread_id: tweet.thread_id || existingTweet.thread_id,
+            conversation_id: tweet.conversation_id || existingTweet.conversation_id,
+            thread_index: tweet.thread_index !== undefined ? tweet.thread_index : existingTweet.thread_index,
+            thread_position: tweet.thread_position !== undefined ? tweet.thread_position : existingTweet.thread_position,
+            is_root_tweet: tweet.is_root_tweet !== undefined ? tweet.is_root_tweet : existingTweet.is_root_tweet,
+            in_reply_to_tweet_id: tweet.in_reply_to_tweet_id || existingTweet.in_reply_to_tweet_id,
+            is_self_thread: tweet.is_self_thread !== undefined ? tweet.is_self_thread : existingTweet.is_self_thread
+          };
           
-          // Update thread ordering information if available
-          if (preserveThreadOrder && tweet.thread_id) {
-            updateFields.thread_index = tweet.thread_index;
-          }
+          // Update non-thread metadata if available
+          if (tweet.author) updateFields.author = tweet.author;
+          if (tweet.media_urls) updateFields.media_urls = tweet.media_urls;
+          if (tweet.media) updateFields.media = tweet.media;
           
           const updatedTweet = await Tweet.findOneAndUpdate(
             { id: tweet.id },
@@ -157,22 +210,32 @@ exports.saveTweets = async (req, res) => {
           savedTweets.push(updatedTweet);
           continue;
         }
+        // If not preserving or skipping, we'll overwrite below
       }
       
-      // If not skipped as a duplicate, save the tweet
+      // Ensure the tweet has a savedBy field and current timestamp
       const tweetToSave = {
         ...tweet,
         savedBy: saveUsername,
         savedAt: new Date()
       };
       
+      // Make sure all required thread metadata is present
+      if (tweetToSave.thread_id || tweetToSave.conversation_id) {
+        tweetToSave.thread_id = tweetToSave.thread_id || tweetToSave.conversation_id;
+        tweetToSave.conversation_id = tweetToSave.conversation_id || tweetToSave.thread_id;
+      }
+      
       const savedTweet = await Tweet.findOneAndUpdate(
         { id: tweet.id },
         tweetToSave,
         { new: true, upsert: true }
       );
+      
       savedTweets.push(savedTweet);
     }
+    
+    console.log(`Successfully saved ${savedTweets.length} tweets, skipped ${skippedTweets.length} duplicates`);
     
     res.status(201).json({
       success: true,
@@ -215,33 +278,58 @@ exports.getSavedTweets = async (req, res) => {
     // Second pass: sort tweets within each thread
     const threads = [];
     threadMap.forEach((tweets, threadId) => {
-      // Sort by thread_index if available, otherwise by created_at
-      tweets.sort((a, b) => {
-        // If both tweets have thread_index, use that for sorting
-        if (a.thread_index !== undefined && b.thread_index !== undefined) {
-          return a.thread_index - b.thread_index;
-        }
-        // Otherwise fall back to created_at date
-        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-      });
-      
-      if (tweets.length > 0) {
+      // Only process threads with more than one tweet
+      if (tweets.length > 1) {
+        // Sort by thread_index if available, otherwise by created_at
+        tweets.sort((a, b) => {
+          // If both tweets have thread_index, use that for sorting
+          if (a.thread_index !== undefined && b.thread_index !== undefined) {
+            return a.thread_index - b.thread_index;
+          }
+          
+          // If both have thread_position, use that
+          if (a.thread_position !== undefined && b.thread_position !== undefined) {
+            return a.thread_position - b.thread_position;
+          }
+          
+          // Otherwise fall back to created_at date
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        });
+        
+        // Get the newest tweet in the thread for sorting 
+        const newestTweet = [...tweets].sort((a, b) => 
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )[0];
+        
         // Add each thread with its sorted tweets
         threads.push({
           id: threadId,
           tweets: tweets,
-          savedAt: tweets[0].savedAt,  // Use the first tweet's savedAt time for the thread
-          created_at: tweets[0].created_at // Use the first tweet's created_at for sorting
+          savedAt: newestTweet.savedAt,  // Use the newest tweet's savedAt
+          created_at: newestTweet.created_at // Use the newest tweet's created_at for sorting
         });
+      } else if (tweets.length === 1) {
+        // If only one tweet in thread, treat as standalone
+        standaloneItems.push(tweets[0]);
       }
     });
     
-    // Combine standalone tweets and threads, sorted by savedAt (newest first)
-    const result = [...standaloneItems, ...threads].sort((a, b) => {
-      const dateA = new Date(a.savedAt || a.created_at).getTime();
-      const dateB = new Date(b.savedAt || b.created_at).getTime();
+    // Sort standalone tweets by created_at date (newest first)
+    standaloneItems.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
       return dateB - dateA; // Newest first
     });
+    
+    // Sort threads by their newest tweet's date
+    threads.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      return dateB - dateA; // Newest first
+    });
+    
+    // Combine standalone tweets and threads
+    const result = [...standaloneItems, ...threads];
     
     res.status(200).json({
       success: true,
@@ -313,33 +401,58 @@ exports.getSavedTweetsByUser = async (req, res) => {
     // Second pass: sort tweets within each thread
     const threads = [];
     threadMap.forEach((tweets, threadId) => {
-      // Sort by thread_index if available, otherwise by created_at
-      tweets.sort((a, b) => {
-        // If both tweets have thread_index, use that for sorting
-        if (a.thread_index !== undefined && b.thread_index !== undefined) {
-          return a.thread_index - b.thread_index;
-        }
-        // Otherwise fall back to created_at date
-        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-      });
-      
-      if (tweets.length > 0) {
+      // Only process threads with more than one tweet
+      if (tweets.length > 1) {
+        // Sort by thread_index if available, otherwise by created_at
+        tweets.sort((a, b) => {
+          // If both tweets have thread_index, use that for sorting
+          if (a.thread_index !== undefined && b.thread_index !== undefined) {
+            return a.thread_index - b.thread_index;
+          }
+          
+          // If both have thread_position, use that
+          if (a.thread_position !== undefined && b.thread_position !== undefined) {
+            return a.thread_position - b.thread_position;
+          }
+          
+          // Otherwise fall back to created_at date
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        });
+        
+        // Get the newest tweet in the thread for sorting
+        const newestTweet = [...tweets].sort((a, b) => 
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )[0];
+        
         // Add each thread with its sorted tweets
         threads.push({
           id: threadId,
           tweets: tweets,
-          savedAt: tweets[0].savedAt,  // Use the first tweet's savedAt time for the thread
-          created_at: tweets[0].created_at // Use the first tweet's created_at for sorting
+          savedAt: newestTweet.savedAt,  // Use the newest tweet's savedAt
+          created_at: newestTweet.created_at // Use the newest tweet's created_at for sorting
         });
+      } else if (tweets.length === 1) {
+        // If only one tweet in thread, treat as standalone
+        standaloneItems.push(tweets[0]);
       }
     });
     
-    // Combine standalone tweets and threads, sorted by savedAt (newest first)
-    const result = [...standaloneItems, ...threads].sort((a, b) => {
-      const dateA = new Date(a.savedAt || a.created_at).getTime();
-      const dateB = new Date(b.savedAt || b.created_at).getTime();
+    // Sort standalone tweets by created_at date (newest first)
+    standaloneItems.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
       return dateB - dateA; // Newest first
     });
+    
+    // Sort threads by their newest tweet's date
+    threads.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      return dateB - dateA; // Newest first
+    });
+    
+    // Combine standalone tweets and threads
+    const result = [...standaloneItems, ...threads];
     
     res.status(200).json({
       success: true,

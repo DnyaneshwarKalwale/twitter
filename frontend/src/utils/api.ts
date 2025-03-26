@@ -2,7 +2,7 @@ import { TwitterResponse, Tweet, Thread } from './types';
 import { toast } from '@/hooks/use-toast';
 
 // API configuration
-const RAPID_API_KEY = '20efe22d0cmsh1570fafd899bed9p112e68jsn3763ca45ca50';
+const RAPID_API_KEY = '6b7ba3353cmshbcc5b8059cfbbe5p1a8612jsnf86291396aec';
 const RAPID_API_HOST = 'twitter154.p.rapidapi.com';
 const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
@@ -26,6 +26,26 @@ const FAILED_REQUEST_EXPIRY = 10 * 60 * 1000;
 let lastApiCallTime = 0;
 const requestQueue: (() => Promise<any>)[] = [];
 let isProcessingQueue = false;
+
+// User configurable options
+export const TwitterConfig = {
+  fetchLimit: 50, // Default number of tweets to fetch initially
+  maxTweets: 200, // Maximum number of tweets to fetch in total
+  threadsToProcess: 10, // Number of threads to process for replies
+  maxContinuations: 3, // Maximum number of continuation fetches
+  replyMaxPages: 4, // Maximum number of pages when fetching replies
+  retryDelay: 3000, // Delay between retries in ms
+  setFetchLimit: (limit: number) => {
+    if (limit > 0 && limit <= 100) {
+      TwitterConfig.fetchLimit = limit;
+    }
+  },
+  setMaxTweets: (max: number) => {
+    if (max > 0) {
+      TwitterConfig.maxTweets = max;
+    }
+  }
+};
 
 // Helper functions
 const rateLimit = async (): Promise<void> => {
@@ -186,54 +206,66 @@ const processTweet = (tweet: any): Tweet => {
     const textContent = tweet.extended_text || tweet.extended_tweet?.full_text || tweet.full_text || tweet.text || '';
     const isLikelyTruncated = detectTruncatedText(textContent);
     
-  // Handle media
+    // Get media URLs efficiently
     const mediaUrls = [
       ...(tweet.media_urls || []),
       ...(tweet.extended_entities?.media?.map((m: any) => m.media_url_https || m.video_info?.variants?.[0]?.url) || []),
       ...(tweet.entities?.media?.map((m: any) => m.media_url_https || m.video_info?.variants?.[0]?.url) || [])
     ].filter(Boolean);
     
-  // Process media items
-  const processedMedia = mediaUrls.map((url: string, i: number) => {
-    const isVideo = url.includes('.mp4') || url.includes('/video/');
-    const isGif = url.includes('.gif');
-    
-    return {
+    // Process media items at once
+    const processedMedia = mediaUrls.map((url: string, i: number) => ({
       media_key: `media-${tweet.tweet_id}-${i}`,
-      type: isVideo ? 'video' as const : isGif ? 'animated_gif' as const : 'photo' as const,
+      type: url.includes('.mp4') || url.includes('/video/') ? 'video' as const : 
+            url.includes('.gif') ? 'animated_gif' as const : 'photo' as const,
       url: url,
       preview_image_url: tweet.extended_entities?.media?.[0]?.media_url_https || url,
-    };
-  });
+    }));
 
-  // Clean text
-  let cleanedText = textContent
-    .replace(/\s*https:\/\/t\.co\/\w+$/g, '')
-    .replace(/(\s*[…\.]{3,})$/g, '')
-    .replace(/\n{3,}/g, '\n\n');
+    // Clean text efficiently
+    const cleanedText = textContent
+      .replace(/\s*https:\/\/t\.co\/\w+$/g, '')
+      .replace(/(\s*[…\.]{3,})$/g, '')
+      .replace(/\n{3,}/g, '\n\n');
     
+    // Better thread and conversation detection
+    const conversation_id = tweet.conversation_id || tweet.in_reply_to_status_id || tweet.tweet_id;
+    const thread_id = tweet.thread_id || conversation_id;
+    const in_reply_to_tweet_id = tweet.in_reply_to_tweet_id || tweet.in_reply_to_status_id;
+    
+    // Handle self-thread detection
+    const isSelfThread = tweet.in_reply_to_user_id && 
+                       tweet.user?.user_id && 
+                       tweet.in_reply_to_user_id === tweet.user.user_id;
+    
+    // Only log important conversation information
+    if (in_reply_to_tweet_id && (conversation_id !== tweet.tweet_id) && isSelfThread) {
+      console.log(`Tweet ${tweet.tweet_id} is part of self-thread with conversation ID ${conversation_id}`);
+    }
+      
     return {
       id: tweet.tweet_id,
       text: tweet.text || '',
       full_text: cleanedText,
       created_at: tweet.creation_date,
       author: {
-      id: tweet.user?.user_id,
-      name: tweet.user?.name,
-      username: tweet.user?.username,
-      profile_image_url: tweet.user?.profile_pic_url
-    },
-    reply_count: tweet.reply_count || 0,
-    retweet_count: tweet.retweet_count || 0,
-    favorite_count: tweet.favorite_count || 0,
-    quote_count: tweet.quote_count || 0,
-    media: processedMedia,
-    conversation_id: tweet.conversation_id || tweet.tweet_id,
+        id: tweet.user?.user_id,
+        name: tweet.user?.name,
+        username: tweet.user?.username,
+        profile_image_url: tweet.user?.profile_pic_url
+      },
+      reply_count: tweet.reply_count || 0,
+      retweet_count: tweet.retweet_count || 0,
+      favorite_count: tweet.favorite_count || 0,
+      quote_count: tweet.quote_count || 0,
+      media: processedMedia,
+      conversation_id,
       in_reply_to_user_id: tweet.in_reply_to_user_id,
-      in_reply_to_tweet_id: tweet.in_reply_to_tweet_id,
-    is_long: textContent.length > 280 || isLikelyTruncated,
-    thread_id: tweet.conversation_id || tweet.tweet_id,
-  };
+      in_reply_to_tweet_id,
+      is_long: textContent.length > 280 || isLikelyTruncated,
+      thread_id,
+      is_self_thread: isSelfThread,
+    };
 };
 
 // Fetch all replies for a tweet to build complete threads
@@ -241,245 +273,269 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
   const allReplies: Tweet[] = [];
   let continuationToken: string | null = null;
   let attempts = 0;
-  const MAX_REPLIES_ATTEMPTS = 5; // Increased from 3 to ensure we get more thread tweets
+  const REPLY_MAX_ATTEMPTS = 3; // Renamed to avoid variable redeclaration
+  const REPLY_MAX_PAGES = TwitterConfig.replyMaxPages; // Use configurable value
   const uniqueReplyIds = new Set<string>();
-  const authorUsername = username.toLowerCase();
+  let pageCount = 0;
+  
+  console.log(`Starting to fetch replies for tweet ${tweetId} by user ${username}`);
 
   do {
     try {
+      // Only make the API call if we haven't exceeded page limits
+      if (pageCount >= REPLY_MAX_PAGES) {
+        console.log(`Reached maximum page limit (${REPLY_MAX_PAGES}) for tweet ${tweetId}, stopping`);
+        break;
+      }
+
       const url = continuationToken 
         ? `https://twitter154.p.rapidapi.com/tweet/replies/continuation?tweet_id=${tweetId}&continuation_token=${encodeURIComponent(continuationToken)}`
         : `https://twitter154.p.rapidapi.com/tweet/replies?tweet_id=${tweetId}`;
 
+      console.log(`Fetching replies for tweet ${tweetId}, page ${pageCount + 1}`);
       const response = await makeApiRequest(url);
       
       if (response?.replies?.length) {
-        const processed = response.replies
+        // Process replies once and filter efficiently
+        const filteredReplies = response.replies
           .map(processTweet)
           .filter((t: Tweet) => {
-            // Only include replies from the original author or direct replies to their tweets
-            const isAuthor = t.author.username.toLowerCase() === authorUsername;
-            const isReplyToAuthor = t.in_reply_to_user_id && 
-              response.replies.some(r => 
-                r.user?.user_id === t.in_reply_to_user_id && 
-                r.user?.username.toLowerCase() === authorUsername
-              );
+            // Only check for username match once and store result
+            const isAuthor = t.author.username.toLowerCase() === username.toLowerCase();
+            if (!isAuthor) return false;
             
-            const isUnique = !uniqueReplyIds.has(t.id);
-            if (isUnique) uniqueReplyIds.add(t.id);
+            // Skip if already seen
+            if (uniqueReplyIds.has(t.id)) return false;
             
-            // Include only the author's tweets or direct replies to the author's tweets
-            return isUnique && (isAuthor || isReplyToAuthor);
+            // Include in results and mark as processed
+            uniqueReplyIds.add(t.id);
+            return true;
           });
         
-        allReplies.push(...processed);
+        // Only add new unique replies
+        if (filteredReplies.length > 0) {
+          allReplies.push(...filteredReplies);
+          console.log(`Found ${filteredReplies.length} new replies for tweet ${tweetId} (page ${pageCount + 1})`);
+          
+          // If we found replies on this page, always try to get the next page
+          // This ensures we get complete threads
+          if (response?.continuation_token) {
+            continuationToken = response.continuation_token;
+          }
+        } else {
+          console.log(`No new author replies found on page ${pageCount + 1} for tweet ${tweetId}`);
+          
+          // If we didn't find author replies on this page, only continue if there are
+          // a significant number of total replies (might be paginated)
+          if (response.replies.length >= 10 && response?.continuation_token) {
+            continuationToken = response.continuation_token;
+          } else {
+            // Otherwise, no point continuing pagination
+            continuationToken = null;
+          }
+        }
+      } else {
+        console.log(`No replies found for tweet ${tweetId} (page ${pageCount + 1})`);
+        continuationToken = null;
       }
 
-      continuationToken = response?.continuation_token || null;
-      attempts++;
-
-      // Small delay between requests
+      // Track continuation token and increment counters
+      pageCount++;
+      
+      // Reset attempt counter after successful response
+      attempts = 0;
+      
+      // Delay between pages is still needed but can be shorter
       await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (error) {
-      console.error(`Error fetching replies for tweet ${tweetId}:`, error);
-      break;
+      console.error(`Error fetching replies for tweet ${tweetId} (attempt ${attempts+1}):`, error);
+      attempts++;
+      
+      // Add a longer delay on error
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Break immediately if we hit max attempts
+      if (attempts >= REPLY_MAX_ATTEMPTS) {
+        console.log(`Reached maximum attempts (${REPLY_MAX_ATTEMPTS}) for tweets ${tweetId}, moving on`);
+        break;
+      }
     }
-  } while (continuationToken && attempts < MAX_REPLIES_ATTEMPTS);
+  } while (continuationToken && attempts < REPLY_MAX_ATTEMPTS && pageCount < REPLY_MAX_PAGES);
 
-  // Sort replies chronologically
-  allReplies.sort((a, b) => {
-    const dateA = new Date(a.created_at).getTime();
-    const dateB = new Date(b.created_at).getTime();
-    return dateA - dateB; // Oldest first
-  });
+  // Additional processing for self-threads
+  if (allReplies.length > 1) {
+    // Sort replies by creation time to ensure thread is in order
+    allReplies.sort((a, b) => {
+      try {
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      } catch (err) {
+        // If date parsing fails, try to use ID as fallback (Twitter IDs are chronological)
+        return Number(BigInt(a.id) - BigInt(b.id));
+      }
+    });
+    
+    // Set thread position for each tweet
+    allReplies.forEach((tweet, index) => {
+      tweet.thread_position = index;
+      tweet.thread_index = index;
+    });
+  }
 
+  console.log(`Total replies fetched for tweet ${tweetId}: ${allReplies.length} across ${pageCount} pages`);
   return allReplies;
 };
 
-// Improved function to fetch tweet thread
-const fetchFullThread = async (tweetId: string, username: string): Promise<Tweet[]> => {
-  // Start with an empty array to collect all tweets in the thread
-  const threadTweets: Tweet[] = [];
-  const processedIds = new Set<string>();
-  let currentTweetId = tweetId;
-  let attempts = 0;
-  const MAX_THREAD_ATTEMPTS = 10; // Limit to prevent infinite loops
-  
-  // First, try to get the root tweet of the thread by following the in_reply_to chain
-  while (currentTweetId && attempts < MAX_THREAD_ATTEMPTS) {
-    try {
-      const tweet = await fetchTweetDetails(currentTweetId);
-      if (!tweet) break;
-      
-      // Add this tweet to our collection if it's from the right author
-      if (tweet.author.username.toLowerCase() === username.toLowerCase()) {
-        if (!processedIds.has(tweet.id)) {
-          threadTweets.unshift(tweet); // Add to beginning since we're going backward
-          processedIds.add(tweet.id);
-        }
-      }
-      
-      // If this tweet is a reply, move to the parent tweet
-      if (tweet.in_reply_to_tweet_id) {
-        currentTweetId = tweet.in_reply_to_tweet_id;
-      } else {
-        // We've reached the root tweet
-        break;
-      }
-      
-      attempts++;
-    } catch (error) {
-      console.error(`Error fetching tweet ${currentTweetId} in thread:`, error);
-      break;
-    }
-  }
-  
-  // Now get all replies to the root tweet (which should be first in our array now)
-  if (threadTweets.length > 0) {
-    const rootTweetId = threadTweets[0].id;
-    const replies = await fetchAllReplies(rootTweetId, username);
-    
-    // Add any replies we don't already have
-    replies.forEach(reply => {
-      if (!processedIds.has(reply.id) && 
-          reply.author.username.toLowerCase() === username.toLowerCase()) {
-        threadTweets.push(reply);
-        processedIds.add(reply.id);
-      }
-    });
-    
-    // Sort all tweets chronologically
-    threadTweets.sort((a, b) => {
-      const dateA = new Date(a.created_at).getTime();
-      const dateB = new Date(b.created_at).getTime();
-      return dateA - dateB; // Oldest first
-    });
-  }
-  
-  return threadTweets;
-};
-
 // Main function to fetch user tweets with complete threads
-export const fetchUserTweets = async (username: string): Promise<Tweet[]> => {
+export const fetchUserTweets = async (username: string, options?: { 
+  initialFetch?: number, 
+  maxTweets?: number 
+}): Promise<Tweet[]> => {
   try {
+    // Apply user-provided options if available
+    const initialFetchLimit = options?.initialFetch || TwitterConfig.fetchLimit;
+    const maxTweets = options?.maxTweets || TwitterConfig.maxTweets;
+    
     const cacheKey = username.toLowerCase();
     if (API_CACHE.userTweets.has(cacheKey)) {
+      console.log(`Using cached tweets for user ${username}`);
       return API_CACHE.userTweets.get(cacheKey) || [];
     }
+    
+    console.log(`Fetching ${initialFetchLimit} tweets for user ${username}`);
     
     // Get user ID first
     const userData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/details?username=${username}`);
     const userId = userData.user_id;
     if (!userId) throw new Error(`Could not find user ID for @${username}`);
 
-    // Initial fetch with more tweets to ensure we get complete threads
-    const initialData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=100&user_id=${userId}&include_replies=true&include_pinned=false&includeFulltext=true`);
+    // Initial fetch - use user-specified limit
+    const initialData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=${initialFetchLimit}&user_id=${userId}&include_replies=false&include_pinned=false&includeFulltext=true`);
     
     // Process and filter tweets by author
     let allTweets = processTweets(initialData)
       .filter(tweet => tweet.author.username.toLowerCase() === username.toLowerCase());
 
+    console.log(`Found ${allTweets.length} tweets in initial fetch for ${username}`);
+
     // Create a Set to track unique tweet IDs
     const uniqueTweetIds = new Set<string>();
     allTweets.forEach(tweet => uniqueTweetIds.add(tweet.id));
 
-    // Create a list to store potential thread root tweets
-    const potentialThreadRoots = allTweets.filter(tweet => 
-      // Tweet has replies or is a reply
-      tweet.reply_count > 0 || tweet.in_reply_to_tweet_id || 
-      // Tweet text suggests it's part of a thread
-      tweet.is_long
-    );
+    // PRIORITY: Identify and fetch thread replies first
+    // Choose threads with highest reply counts to save API calls
+    const threadsToProcess = [...allTweets]
+      .filter(tweet => tweet.reply_count && tweet.reply_count > 0) 
+      .sort((a, b) => (b.reply_count || 0) - (a.reply_count || 0))
+      .slice(0, TwitterConfig.threadsToProcess); // Use configurable value
 
-    console.log(`Found ${potentialThreadRoots.length} potential thread tweets`);
-
-    // For each potential thread root, fetch the complete thread
-    const threadPromises = potentialThreadRoots.map(async tweet => {
-      try {
-        // Get the root tweet ID (either this tweet or the tweet it's replying to)
-        let rootTweetId = tweet.id;
-        
-        // If this is a reply, we need to find the thread root
-        if (tweet.in_reply_to_tweet_id) {
-          // Try to follow the reply chain to find the root
-          rootTweetId = tweet.in_reply_to_tweet_id;
-          
-          // Check if the parent is by the same author
-          try {
-            const parentTweet = await fetchTweetDetails(rootTweetId);
-            if (parentTweet && 
-                parentTweet.author.username.toLowerCase() === username.toLowerCase()) {
-              // This is part of a self-thread, use the parent as the root
-              rootTweetId = parentTweet.id;
-            } else {
-              // This is a reply to someone else, use the original tweet as root
-              rootTweetId = tweet.id;
-            }
-          } catch (error) {
-            console.error(`Error fetching parent tweet ${rootTweetId}:`, error);
-            rootTweetId = tweet.id; // Fallback to original tweet
-          }
-        }
-        
-        // Fetch the complete thread for this root
-        const fullThread = await fetchFullThread(rootTweetId, username);
-        
-        // Filter out any tweets we already have
-        return fullThread.filter(t => !uniqueTweetIds.has(t.id) || t.id === tweet.id);
-      } catch (error) {
-        console.error(`Error processing thread for tweet ${tweet.id}:`, error);
-        return [tweet]; // Return the original tweet if there's an error
-      }
-    });
-
-    // Wait for all threads to be fetched
-    const threadResults = await Promise.all(threadPromises);
+    console.log(`Selected ${threadsToProcess.length} threads to fetch replies for`);
     
-    // Add all the new thread tweets to our collection
-    threadResults.forEach(threadTweets => {
-      threadTweets.forEach(tweet => {
-        if (!uniqueTweetIds.has(tweet.id)) {
-          uniqueTweetIds.add(tweet.id);
-          allTweets.push(tweet);
-        }
-      });
-    });
-
-    // Fetch more tweets if we have continuation token
-    let continuationToken = initialData.continuation_token;
-    let continuationAttempts = 0;
-    const MAX_PAGINATION_ATTEMPTS = 3;
-
-    while (continuationToken && allTweets.length < 200 && continuationAttempts < MAX_PAGINATION_ATTEMPTS) {
+    // Process threads first to build complete conversations
+    for (const tweet of threadsToProcess) {
       try {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        console.log(`Fetching replies for tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
+        const replies = await fetchAllReplies(tweet.id, username);
         
+        // Filter out any replies we already have
+        const newReplies = replies.filter(reply => {
+          if (uniqueTweetIds.has(reply.id)) return false;
+          uniqueTweetIds.add(reply.id);
+          return true;
+        });
+        
+        if (newReplies.length > 0) {
+          console.log(`Added ${newReplies.length} new replies for tweet ${tweet.id}`);
+          allTweets.push(...newReplies);
+        }
+        
+        // Add delay between processing tweets
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (error) {
+        console.error(`Error fetching replies for tweet ${tweet.id}:`, error);
+        // Add longer delay after error
+        await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+    }
+
+    console.log(`After fetching replies, total tweet count: ${allTweets.length}`);
+
+    // Continue fetching more tweets using continuation token if we haven't reached maxTweets yet
+    let continuationToken = initialData.continuation_token;
+    let continuationCount = 0;
+    
+    while (continuationToken && allTweets.length < maxTweets && continuationCount < TwitterConfig.maxContinuations) {
+      try {
+        console.log(`Fetching continuation ${continuationCount + 1} for ${username}`);
         const continuationData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets/continuation?username=${username}&continuation_token=${continuationToken}&user_id=${userId}`);
         
         const additionalTweets = processTweets(continuationData)
           .filter(tweet => {
+            // Check if it's by the author and unique
             const isAuthor = tweet.author.username.toLowerCase() === username.toLowerCase();
             const isUnique = !uniqueTweetIds.has(tweet.id);
-            if (isUnique && isAuthor) uniqueTweetIds.add(tweet.id);
-            return isAuthor && isUnique;
+            
+            if (isAuthor && isUnique) {
+              uniqueTweetIds.add(tweet.id);
+              return true;
+            }
+            return false;
           });
         
-        allTweets.push(...additionalTweets);
+        console.log(`Found ${additionalTweets.length} new tweets in continuation ${continuationCount + 1}`);
+        
+        if (additionalTweets.length > 0) {
+          allTweets.push(...additionalTweets);
+          
+          // Check if any of these new tweets are part of threads and need replies
+          const newThreadsToProcess = additionalTweets
+            .filter(tweet => tweet.reply_count && tweet.reply_count > 2)
+            .sort((a, b) => (b.reply_count || 0) - (a.reply_count || 0))
+            .slice(0, 5); // Process up to 5 more threads
+            
+          if (newThreadsToProcess.length > 0) {
+            console.log(`Found ${newThreadsToProcess.length} potential new threads in continuation, fetching replies`);
+            
+            for (const tweet of newThreadsToProcess) {
+              try {
+                console.log(`Fetching replies for new tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
+                const replies = await fetchAllReplies(tweet.id, username);
+                
+                // Filter out any replies we already have
+                const newReplies = replies.filter(reply => {
+                  if (uniqueTweetIds.has(reply.id)) return false;
+                  uniqueTweetIds.add(reply.id);
+                  return true;
+                });
+                
+                if (newReplies.length > 0) {
+                  console.log(`Added ${newReplies.length} new replies for tweet ${tweet.id}`);
+                  allTweets.push(...newReplies);
+                }
+                
+                // Add delay between processing tweets
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              } catch (error) {
+                console.error(`Error fetching replies for new tweet ${tweet.id}:`, error);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+          }
+        }
+        
+        // Update continuation token for next fetch
         continuationToken = continuationData.continuation_token;
-        continuationAttempts++;
+        continuationCount++;
+        
+        // Add delay between continuations
+        await new Promise(resolve => setTimeout(resolve, 1500));
       } catch (error) {
-        console.error('Error fetching continuation tweets:', error);
+        console.error(`Error fetching continuation ${continuationCount + 1}:`, error);
         break;
       }
     }
 
-    // Sort all tweets by creation date (newest first)
-    allTweets.sort((a, b) => {
-      const dateA = new Date(a.created_at).getTime();
-      const dateB = new Date(b.created_at).getTime();
-      return dateB - dateA;
-    });
-
+    console.log(`Fetched ${allTweets.length} total tweets (${uniqueTweetIds.size} unique)`);
+    
     // Cache and return results
     API_CACHE.userTweets.set(cacheKey, allTweets);
     return allTweets;
@@ -503,146 +559,258 @@ const processTweets = (response: any): Tweet[] => {
 
 // Group tweets into threads
 export const groupThreads = (tweets: Tweet[]): (Tweet | Thread)[] => {
-  console.log('Starting groupThreads with', tweets.length, 'tweets');
-  
-  // Create maps for tracking
+  // Use maps to efficiently track tweets and threads
   const threadMap = new Map<string, Tweet[]>();
-  const standaloneTweets: Tweet[] = [];
   const tweetMap = new Map<string, Tweet>();
-  const processedTweetIds = new Set<string>();
-  const authorThreadMap = new Map<string, Set<string>>();  // Map author to their thread IDs
+  const processedIds = new Set<string>();
   
-  // Map tweets by ID
-  tweets.forEach(tweet => {
-    tweetMap.set(tweet.id, tweet);
-    
-    // Group tweets by conversation ID or thread ID
-    const threadId = tweet.thread_id || tweet.conversation_id || tweet.id;
-    if (!threadMap.has(threadId)) {
-      threadMap.set(threadId, []);
-    }
-    threadMap.get(threadId)?.push(tweet);
-    
-    // Map author to threads
-    const authorUsername = tweet.author.username.toLowerCase();
-    if (!authorThreadMap.has(authorUsername)) {
-      authorThreadMap.set(authorUsername, new Set());
-    }
-    authorThreadMap.get(authorUsername)?.add(threadId);
-  });
-
-  // Build collection of thread root tweets
-  const rootTweets = new Map<string, Tweet>();
+  // First pass: map tweets for quick access
+  tweets.forEach(tweet => tweetMap.set(tweet.id, tweet));
   
-  // First, identify potential root tweets (not replies or first tweet in reply chain)
+  console.log(`Organizing ${tweets.length} tweets into threads`);
+  
+  // Pre-process to find explicit self-threads
+  // These are tweets where is_self_thread is true, or where the user replies to themselves
+  const selfThreads: Map<string, Set<string>> = new Map();
+  
   tweets.forEach(tweet => {
-    // If it's not a reply or we don't have the parent tweet, it's a potential root
-    if (!tweet.in_reply_to_tweet_id || !tweetMap.has(tweet.in_reply_to_tweet_id)) {
-      const threadId = tweet.thread_id || tweet.conversation_id || tweet.id;
-      // Only add if we don't already have a root for this thread
-      if (!rootTweets.has(threadId)) {
-        rootTweets.set(threadId, tweet);
-      } else {
-        // If this tweet is older than the existing root, replace it
-        const existingRoot = rootTweets.get(threadId)!;
-        const existingDate = new Date(existingRoot.created_at).getTime();
-        const newDate = new Date(tweet.created_at).getTime();
-        if (newDate < existingDate) {
-          rootTweets.set(threadId, tweet);
+    // If tweet is marked as self-thread already
+    if (tweet.is_self_thread && tweet.conversation_id) {
+      if (!selfThreads.has(tweet.conversation_id)) {
+        selfThreads.set(tweet.conversation_id, new Set<string>());
+      }
+      selfThreads.get(tweet.conversation_id)!.add(tweet.id);
+      
+      // Add the reply-to tweet ID if it exists
+      if (tweet.in_reply_to_tweet_id && tweetMap.has(tweet.in_reply_to_tweet_id)) {
+        selfThreads.get(tweet.conversation_id)!.add(tweet.in_reply_to_tweet_id);
+      }
+    }
+    // If tweet is a reply to another tweet by the same author
+    else if (tweet.in_reply_to_tweet_id && tweet.in_reply_to_user_id) {
+      const replyToTweet = tweetMap.get(tweet.in_reply_to_tweet_id);
+      if (replyToTweet && replyToTweet.author.id === tweet.author.id) {
+        const threadId = tweet.conversation_id || tweet.thread_id || tweet.in_reply_to_tweet_id;
+        if (!selfThreads.has(threadId)) {
+          selfThreads.set(threadId, new Set<string>());
         }
+        selfThreads.get(threadId)!.add(tweet.id);
+        selfThreads.get(threadId)!.add(tweet.in_reply_to_tweet_id);
       }
     }
   });
   
-  console.log('Found', rootTweets.size, 'root tweets');
+  // Process explicit self-threads first
+  selfThreads.forEach((tweetIds, threadId) => {
+    if (tweetIds.size > 1) {
+      console.log(`Found self-thread with ID ${threadId} containing ${tweetIds.size} tweets`);
+      
+      // Get all tweets in this thread
+      const threadTweets = Array.from(tweetIds)
+        .map(id => tweetMap.get(id))
+        .filter(t => t !== undefined) as Tweet[];
+      
+      // Sort tweets by thread_position if available, otherwise by creation time
+      threadTweets.sort((a, b) => {
+        if (a.thread_position !== undefined && b.thread_position !== undefined) {
+          return a.thread_position - b.thread_position;
+        }
+        
+        if (a.thread_index !== undefined && b.thread_index !== undefined) {
+          return a.thread_index - b.thread_index;
+        }
+        
+        // Try parsing dates
+        try {
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        } catch (err) {
+          // Use tweet IDs as fallback
+          return Number(BigInt(a.id) - BigInt(b.id));
+        }
+      });
+      
+      // Only create threads with more than one tweet
+      if (threadTweets.length > 1) {
+        // Set thread positions if not already set
+        threadTweets.forEach((tweet, idx) => {
+          tweet.thread_position = idx;
+          tweet.thread_index = idx;
+          processedIds.add(tweet.id);
+        });
+        
+        threadMap.set(threadId, threadTweets);
+      }
+    }
+  });
   
-  // Create thread objects from the root tweets
-  const threads: Thread[] = [];
-  const finalThreadMap = new Map<string, string>();  // Maps tweet ID to thread ID
-  
-  rootTweets.forEach((rootTweet, threadId) => {
-    if (processedTweetIds.has(rootTweet.id)) return;
+  // Process remaining tweets to find additional threads and conversations
+  tweets.forEach(tweet => {
+    if (processedIds.has(tweet.id)) return;
     
-    // Get all tweets in this thread
-    const threadTweets = threadMap.get(threadId) || [];
-    const authorUsername = rootTweet.author.username.toLowerCase();
+    const threadId = tweet.conversation_id || tweet.thread_id || tweet.id;
     
-    // Filter to just tweets from the same author that aren't processed yet
-    const authorThreadTweets = threadTweets.filter(t => {
-      return t.author.username.toLowerCase() === authorUsername && 
-             !processedTweetIds.has(t.id);
+    // Find potential thread participants that weren't already in self-threads
+    const threadMembers = tweets.filter(t => 
+      !processedIds.has(t.id) && 
+      ((t.conversation_id && t.conversation_id === threadId) || 
+       (t.thread_id && t.thread_id === threadId) ||
+       (t.in_reply_to_tweet_id && tweetMap.has(t.in_reply_to_tweet_id) && 
+        t.author.id === tweet.author.id)) // Only group together tweets by the same author
+    );
+    
+    if (threadMembers.length <= 1) {
+      // This is a standalone tweet
+      processedIds.add(tweet.id);
+      if (!threadMap.has('standalone')) {
+        threadMap.set('standalone', []);
+      }
+      threadMap.get('standalone')!.push(tweet);
+      return;
+    }
+    
+    // Try to establish thread order
+    const thread: Tweet[] = [];
+    const replyMap = new Map<string, Tweet[]>();
+    
+    // Build reply relationships
+    threadMembers.forEach(t => {
+      if (t.in_reply_to_tweet_id) {
+        if (!replyMap.has(t.in_reply_to_tweet_id)) {
+          replyMap.set(t.in_reply_to_tweet_id, []);
+        }
+        replyMap.get(t.in_reply_to_tweet_id)!.push(t);
+      }
     });
     
-    if (authorThreadTweets.length > 1) {
-      // We have a real thread with multiple tweets from the same author
-      
-      // Sort chronologically
-      authorThreadTweets.sort((a, b) => {
-        const dateA = new Date(a.created_at).getTime();
-        const dateB = new Date(b.created_at).getTime();
-        return dateA - dateB;  // Oldest first
+    // Find potential root tweet - give preference to tweets that:
+    // 1. Have no in_reply_to
+    // 2. Are not a reply to another thread member
+    // 3. Have the earliest creation date
+    let rootTweet = threadMembers.find(t => 
+      !t.in_reply_to_tweet_id || 
+      !threadMembers.some(other => other.id === t.in_reply_to_tweet_id)
+    );
+    
+    if (!rootTweet) {
+      // No clear root found, use earliest tweet as root
+      threadMembers.sort((a, b) => {
+        try {
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        } catch (err) {
+          // Use tweet IDs as fallback
+          return Number(BigInt(a.id) - BigInt(b.id));
+        }
       });
       
-      // Apply thread positions and mark as processed
-      authorThreadTweets.forEach((t, i) => {
+      rootTweet = threadMembers[0];
+    }
+    
+    if (rootTweet) {
+      // Build thread from root
+      thread.push(rootTweet);
+      processedIds.add(rootTweet.id);
+      
+      // Build thread sequence 
+      let currentId = rootTweet.id;
+      
+      // Recursively find all replies to build the thread
+      const findReplies = (tweetId: string, depth: number = 0): Tweet[] => {
+        if (depth > 10) return []; // Prevent infinite recursion
+        if (!replyMap.has(tweetId)) return [];
+        
+        const result: Tweet[] = [];
+        const replies = replyMap.get(tweetId)!.sort((a, b) => {
+          try {
+            return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+          } catch (err) {
+            return Number(BigInt(a.id) - BigInt(b.id));
+          }
+        });
+        
+        for (const reply of replies) {
+          if (!processedIds.has(reply.id)) {
+            result.push(reply);
+            processedIds.add(reply.id);
+            // Find replies to this reply
+            result.push(...findReplies(reply.id, depth + 1));
+          }
+        }
+        
+        return result;
+      };
+      
+      // Add all replies in the correct order
+      thread.push(...findReplies(rootTweet.id));
+    } else {
+      // No root found, sort by creation time
+      const sorted = [...threadMembers].sort((a, b) => {
+        try {
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        } catch (err) {
+          return Number(BigInt(a.id) - BigInt(b.id));
+        }
+      });
+      
+      thread.push(...sorted);
+      sorted.forEach(t => processedIds.add(t.id));
+    }
+    
+    // Only create a thread if we have multiple tweets
+    if (thread.length > 1) {
+      // Add thread position/index for each tweet
+      thread.forEach((t, i) => {
         t.thread_position = i;
         t.thread_index = i;
-        processedTweetIds.add(t.id);
-        finalThreadMap.set(t.id, threadId);
       });
       
-      // Create the thread object
-      threads.push({
-        id: threadId,
-        tweets: authorThreadTweets,
-        author: rootTweet.author,
-        created_at: rootTweet.created_at
-      });
-    } else if (authorThreadTweets.length === 1) {
-      // Just a single tweet, not a thread
-      processedTweetIds.add(rootTweet.id);
-      standaloneTweets.push(rootTweet);
+      threadMap.set(threadId, thread);
+    } else if (thread.length === 1) {
+      // Move to standalone
+      if (!threadMap.has('standalone')) {
+        threadMap.set('standalone', []);
+      }
+      threadMap.get('standalone')!.push(thread[0]);
     }
   });
   
-  console.log('Created', threads.length, 'threads with', 
-    threads.reduce((acc, thread) => acc + thread.tweets.length, 0), 'total tweets');
-  
-  // Add any remaining unprocessed tweets as standalone
+  // Process any remaining unprocessed tweets as standalone
   tweets.forEach(tweet => {
-    if (!processedTweetIds.has(tweet.id)) {
-      processedTweetIds.add(tweet.id);
-      standaloneTweets.push(tweet);
+    if (!processedIds.has(tweet.id)) {
+      if (!threadMap.has('standalone')) {
+        threadMap.set('standalone', []);
+      }
+      threadMap.get('standalone')!.push(tweet);
+      processedIds.add(tweet.id);
     }
   });
   
-  console.log('Added', standaloneTweets.length, 'standalone tweets');
+  // Build final result array
+  const result: (Tweet | Thread)[] = [];
   
-  // Sort threads by newest first
-  const sortedThreads = threads.sort((a, b) => {
-    const dateA = new Date(a.created_at || '').getTime();
-    const dateB = new Date(b.created_at || '').getTime();
-    if (isNaN(dateA) || isNaN(dateB)) {
-      // Fallback to using the ID of the first tweet
-      return Number(BigInt(b.tweets[0].id) - BigInt(a.tweets[0].id));
+  // Create thread objects
+  threadMap.forEach((tweets, id) => {
+    if (id === 'standalone') {
+      // Add standalone tweets directly
+      result.push(...tweets);
+    } else if (tweets.length > 1) {
+      // Create a thread
+      result.push({
+        id,
+        tweets,
+        author: tweets[0].author,
+        created_at: tweets[0].created_at
+      });
     }
+  });
+  
+  console.log(`Organized tweets into ${result.filter(item => 'tweets' in item).length} threads and ${result.filter(item => !('tweets' in item)).length} standalone tweets`);
+  
+  // Sort by newest first
+  return result.sort((a, b) => {
+    const dateA = 'tweets' in a ? new Date(a.tweets[0].created_at).getTime() : new Date(a.created_at).getTime();
+    const dateB = 'tweets' in b ? new Date(b.tweets[0].created_at).getTime() : new Date(b.created_at).getTime();
     return dateB - dateA;
   });
-  
-  // Sort standalone tweets by newest first
-  const sortedStandaloneTweets = standaloneTweets.sort((a, b) => {
-    const dateA = new Date(a.created_at).getTime();
-    const dateB = new Date(b.created_at).getTime();
-    if (isNaN(dateA) || isNaN(dateB)) {
-      return Number(BigInt(b.id) - BigInt(a.id));
-    }
-    return dateB - dateA;
-  });
-  
-  const result = [...sortedThreads, ...sortedStandaloneTweets];
-  console.log('Final result has', result.length, 'items');
-  
-  return result;
 };
 
 // Other API functions (saveSelectedTweets, fetchTweetDetails, etc.) remain similar to original
@@ -675,13 +843,28 @@ export const fetchTweetContinuation = async (tweetId: string, isSaved: boolean =
   if (!tweetId) return null;
 
   try {
+    console.log(`Fetching tweet continuation for tweet ${tweetId}`);
     const url = `https://twitter154.p.rapidapi.com/tweet/continuation?tweet_id=${tweetId}`;
     if (hasRecentlyFailed(url)) return null;
 
     const data = await makeApiRequest(url);
-    if (!data) return null;
+    if (!data) {
+      console.log(`No continuation data found for tweet ${tweetId}`);
+      return null;
+    }
 
-    return processTweet(data);
+    // Process the tweet
+    const processedTweet = processTweet(data);
+    
+    // Log the continuation tweet information
+    console.log(`Found continuation tweet ${processedTweet.id} for tweet ${tweetId}`, {
+      isReply: !!processedTweet.in_reply_to_tweet_id,
+      inReplyToTweetId: processedTweet.in_reply_to_tweet_id,
+      conversationId: processedTweet.conversation_id,
+      threadId: processedTweet.thread_id
+    });
+    
+    return processedTweet;
   } catch (error) {
     console.error('Error fetching tweet continuation:', error);
     return null;
@@ -690,13 +873,92 @@ export const fetchTweetContinuation = async (tweetId: string, isSaved: boolean =
 
 export const saveSelectedTweets = async (tweets: Tweet[], username: string = 'anonymous'): Promise<boolean> => {
   try {
+    // Validate input
+    if (!tweets || tweets.length === 0) {
+      toast({
+        title: 'No Tweets to Save',
+        description: 'Please select tweets before saving.',
+        variant: 'destructive',
+      });
+      return false;
+    }
+
+    console.log(`Saving ${tweets.length} tweets for user "${username}"`);
+    
+    // Sort tweets by creation date (newest first) before saving
+    const sortedTweets = [...tweets].sort((a, b) => {
+      try {
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      } catch (err) {
+        // If date parsing fails, use IDs as fallback (Twitter IDs are chronological)
+        return Number(BigInt(b.id) - BigInt(a.id));
+      }
+    });
+    
+    // Preserve thread ordering for tweets in the same thread
+    const threadMap = new Map<string, Tweet[]>();
+    
+    // Group by thread/conversation ID
+    sortedTweets.forEach(tweet => {
+      if (tweet.thread_id || tweet.conversation_id) {
+        const threadId = tweet.thread_id || tweet.conversation_id;
+        if (!threadMap.has(threadId)) {
+          threadMap.set(threadId, []);
+        }
+        threadMap.get(threadId)!.push(tweet);
+      }
+    });
+    
+    // Sort tweets within each thread by thread_position or creation date
+    threadMap.forEach((threadTweets, threadId) => {
+      if (threadTweets.length > 1) {
+        threadTweets.sort((a, b) => {
+          // First by thread position if available
+          if (a.thread_position !== undefined && b.thread_position !== undefined) {
+            return a.thread_position - b.thread_position;
+          }
+          
+          // Then by creation date
+          try {
+            return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+          } catch (err) {
+            return Number(BigInt(a.id) - BigInt(b.id));
+          }
+        });
+      }
+    });
+    
+    // Build final ordered tweet list
+    const orderedTweets: Tweet[] = [];
+    
+    // First add standalone tweets (newest first)
+    sortedTweets.filter(tweet => !tweet.thread_id && !tweet.conversation_id)
+      .forEach(tweet => orderedTweets.push(tweet));
+    
+    // Then add thread tweets (maintaining thread order)
+    threadMap.forEach((threadTweets) => {
+      orderedTweets.push(...threadTweets);
+    });
+    
+    console.log(`Prepared ${orderedTweets.length} tweets for saving with correct ordering`);
+    
+    // Ensure all tweets have the necessary properties
+    const processedTweets = orderedTweets.map(tweet => {
+      // Make sure thread information is preserved
+      return {
+        ...tweet,
+        savedAt: new Date().toISOString()
+      };
+    });
+    
+    // Make the API request
     const response = await fetch(`${BACKEND_API_URL}/save`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ 
-        tweets, 
+        tweets: processedTweets, 
         username, 
         options: {
           preserveExisting: true,
@@ -706,9 +968,17 @@ export const saveSelectedTweets = async (tweets: Tweet[], username: string = 'an
       }),
     });
 
-    if (!response.ok) throw new Error(`Error saving tweets: ${response.status}`);
+    // Check response status
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`API error: ${response.status} - ${errorText}`);
+      throw new Error(`Error saving tweets: ${response.status} - ${errorText}`);
+    }
 
+    // Parse and handle response data
     const data = await response.json();
+    
+    // Show success toast
     toast({
       title: 'Tweets Saved',
       description: data.skippedCount 
@@ -721,132 +991,9 @@ export const saveSelectedTweets = async (tweets: Tweet[], username: string = 'an
     console.error('Error saving tweets:', error);
     toast({
       title: 'Error',
-      description: 'Failed to save selected tweets to database.',
+      description: 'Failed to save tweets. Please try again.',
       variant: 'destructive',
     });
     return false;
-  }
-};
-
-// New function to fetch tweets from a list
-export const fetchListTweets = async (listId: string, limit: number = 150): Promise<Tweet[]> => {
-  try {
-    // Initial fetch with increased limit
-    const initialData = await makeApiRequest(`https://twitter154.p.rapidapi.com/lists/tweets?list_id=${listId}&limit=100`);
-    
-    // Process and filter tweets
-    let allTweets = processTweets(initialData);
-
-    // Create a Set to track unique tweet IDs
-    const uniqueTweetIds = new Set<string>();
-    allTweets.forEach(tweet => uniqueTweetIds.add(tweet.id));
-
-    // Fetch more tweets if we have continuation token
-    let continuationToken = initialData.continuation_token;
-    let continuationAttempts = 0;
-    const MAX_LIST_PAGINATION_ATTEMPTS = 5; // Increased to get more tweets
-
-    while (continuationToken && allTweets.length < limit && continuationAttempts < MAX_LIST_PAGINATION_ATTEMPTS) {
-      try {
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        const continuationData = await makeApiRequest(
-          `https://twitter154.p.rapidapi.com/lists/tweets/continuation?list_id=${listId}&limit=100&continuation_token=${encodeURIComponent(continuationToken)}`
-        );
-        
-        if (!continuationData || !continuationData.results) {
-          console.log('No more tweets available in continuation');
-          break;
-        }
-
-        const additionalTweets = processTweets(continuationData)
-          .filter(tweet => {
-            const isUnique = !uniqueTweetIds.has(tweet.id);
-            if (isUnique) uniqueTweetIds.add(tweet.id);
-            return isUnique;
-          });
-        
-        if (additionalTweets.length === 0) {
-          console.log('No new unique tweets found in continuation');
-          break;
-        }
-
-        allTweets.push(...additionalTweets);
-        continuationToken = continuationData.continuation_token;
-        continuationAttempts++;
-
-        console.log(`Fetched ${allTweets.length} tweets so far, continuing...`);
-      } catch (error) {
-        console.error('Error fetching continuation tweets:', error);
-        break;
-      }
-    }
-
-    console.log(`Total tweets fetched: ${allTweets.length}`);
-
-    // Sort all tweets by creation date (newest first)
-    allTweets.sort((a, b) => {
-      try {
-        // Parse dates more carefully to ensure correct ordering
-        const dateA = new Date(a.created_at).getTime();
-        const dateB = new Date(b.created_at).getTime();
-        
-        // If dates can't be parsed correctly, fall back to ID-based ordering
-        if (isNaN(dateA) || isNaN(dateB)) {
-          // Use tweet IDs which are chronological in Twitter's system
-          return Number(BigInt(b.id) - BigInt(a.id));
-        }
-        
-        return dateB - dateA; // Newest first
-      } catch (e) {
-        // Fallback to ID comparison if date parsing fails
-        return Number(BigInt(b.id) - BigInt(a.id));
-      }
-    });
-
-    // Group tweets into threads
-    const threads = groupThreads(allTweets);
-
-    // Sort threads by their first tweet's date (newest first)
-    threads.sort((a, b) => {
-      try {
-        const dateA = new Date(a.created_at || '').getTime();
-        const dateB = new Date(b.created_at || '').getTime();
-        if (isNaN(dateA) || isNaN(dateB)) {
-          // If dates can't be parsed, sort threads so most recent tweets appear first
-          // Using the ID of the first tweet in each thread
-          const aTweets = 'tweets' in a ? a.tweets : [a];
-          const bTweets = 'tweets' in b ? b.tweets : [b];
-          return Number(BigInt(bTweets[0].id) - BigInt(aTweets[0].id));
-        }
-        return dateB - dateA;
-      } catch (e) {
-        // Fallback to first tweet ID comparison
-        const aTweets = 'tweets' in a ? a.tweets : [a];
-        const bTweets = 'tweets' in b ? b.tweets : [b];
-        return Number(BigInt(bTweets[0].id) - BigInt(aTweets[0].id));
-      }
-    });
-
-    // Flatten threads back into tweets while maintaining order
-    const orderedTweets = threads.flatMap(item => {
-      if ('tweets' in item) {
-        // This is a thread
-        return item.tweets;
-      } else {
-        // This is a standalone tweet
-        return [item];
-      }
-    });
-
-    return orderedTweets;
-  } catch (error) {
-    console.error('Error fetching list tweets:', error);
-    toast({
-      title: 'Error',
-      description: 'Failed to fetch list tweets. Please try again.',
-      variant: 'destructive',
-    });
-    return [];
   }
 };

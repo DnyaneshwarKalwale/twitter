@@ -87,27 +87,86 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
       let threadObjects: Thread[] = [];
       const processedTweetIds = new Set<string>(); // Track which tweets are already in threads
       
+      // Sort all data by creation date first (newest first)
+      const sortedData = [...data.data].sort((a, b) => {
+        // Both are tweets or both are threads
+        const aDate = new Date('created_at' in a ? a.created_at : a.tweets[0].created_at).getTime();
+        const bDate = new Date('created_at' in b ? b.created_at : b.tweets[0].created_at).getTime();
+        
+        if (isNaN(aDate) || isNaN(bDate)) {
+          // Fallback to ID comparison if dates can't be parsed
+          const aId = 'id' in a ? a.id : (a as Thread).tweets[0].id;
+          const bId = 'id' in b ? b.id : (b as Thread).tweets[0].id;
+          return Number(BigInt(bId) - BigInt(aId));
+        }
+        
+        return bDate - aDate; // Newest first
+      });
+      
       // First process threads
-      data.data.forEach(item => {
-        if ('tweets' in item && Array.isArray(item.tweets)) {
+      sortedData.forEach(item => {
+        if ('tweets' in item && Array.isArray(item.tweets) && item.tweets.length > 0) {
           // This is a thread object
           console.log(`Processing thread ${item.id} with ${item.tweets.length} tweets`);
-          threadObjects.push(item as Thread);
+          
+          // Sort tweets within the thread by thread position or date
+          const sortedThreadTweets = [...item.tweets].sort((a, b) => {
+            // First by thread_position if available
+            if (a.thread_position !== undefined && b.thread_position !== undefined) {
+              return a.thread_position - b.thread_position;
+            }
+            
+            if (a.thread_index !== undefined && b.thread_index !== undefined) {
+              return a.thread_index - b.thread_index;
+            }
+            
+            // Then try by created_at
+            try {
+              return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+            } catch (e) {
+              // Fallback to ID comparison for chronological order
+              return Number(BigInt(a.id) - BigInt(b.id));
+            }
+          });
+          
+          // Create a new thread object with sorted tweets
+          const thread: Thread = {
+            ...item,
+            tweets: sortedThreadTweets
+          };
+          
+          threadObjects.push(thread);
+          
           // Mark all tweets in this thread as processed
-          item.tweets.forEach(tweet => {
+          sortedThreadTweets.forEach(tweet => {
             processedTweetIds.add(tweet.id);
           });
         }
       });
       
       // Then process individual tweets, excluding those already in threads
-      data.data.forEach(item => {
+      sortedData.forEach(item => {
         if (!('tweets' in item) && !processedTweetIds.has(item.id)) {
-          processedData.push(item as Tweet);
+          // Add additional debugging for potential tweet type issues
+          if (!item.id || !item.created_at) {
+            console.warn('Found invalid tweet object:', item);
+          } else {
+            processedData.push(item as Tweet);
+          }
         }
       });
       
       console.log(`Processed ${processedData.length} individual tweets and ${threadObjects.length} threads`);
+      
+      // Sort individual tweets by date (newest first)
+      processedData.sort((a, b) => {
+        try {
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        } catch (e) {
+          // Fallback to ID comparison
+          return Number(BigInt(b.id) - BigInt(a.id));
+        }
+      });
       
       // Debug check for savedAt property
       const hasSavedAt = processedData.some(tweet => tweet.savedAt);
@@ -123,6 +182,7 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
           const firstTweetInThread = firstThread.tweets[0];
           console.log(`First tweet in first thread: ${JSON.stringify({
             id: firstTweetInThread.id,
+            date: firstTweetInThread.created_at,
             hasSavedAt: firstTweetInThread.savedAt !== undefined,
             threadId: firstTweetInThread.thread_id,
             threadIndex: firstTweetInThread.thread_index
@@ -410,41 +470,8 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
     let displayTweets: Tweet[] = [];
     
     if (activeCategory === 'all') {
-      // For 'all' category, combine threads and tweets into a single chronological list
-      const allTweets: Tweet[] = [];
-      
-      // Add tweets from threads
-      threads.forEach(thread => {
-        allTweets.push(...thread.tweets);
-      });
-      
-      // Add individual tweets
-      allTweets.push(...normalTweets, ...longTweets);
-      
-      // Debug logging for tweet counts
-      console.log('Tweet counts:', {
-        totalFetched: savedTweets.length,
-        inThreads: threads.reduce((acc, thread) => acc + thread.tweets.length, 0),
-        normalTweets: normalTweets.length,
-        longTweets: longTweets.length,
-        combinedTotal: allTweets.length
-      });
-      
-      // Sort all tweets by creation date (newest first)
-      allTweets.sort((a, b) => {
-        try {
-          const dateA = new Date(a.created_at).getTime();
-          const dateB = new Date(b.created_at).getTime();
-          if (isNaN(dateA) || isNaN(dateB)) {
-            return Number(BigInt(b.id) - BigInt(a.id));
-          }
-          return dateB - dateA;
-        } catch (e) {
-          return Number(BigInt(b.id) - BigInt(a.id));
-        }
-      });
-      
-      displayTweets = allTweets;
+      displayThreads = threads;
+      displayTweets = normalTweets.concat(longTweets);
     } else if (activeCategory === 'thread') {
       displayThreads = threads;
     } else if (activeCategory === 'long') {
@@ -454,7 +481,7 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
     }
     
     return { displayThreads, displayTweets };
-  }, [threads, normalTweets, longTweets, activeCategory, savedTweets]);
+  }, [threads, normalTweets, longTweets, activeCategory]);
 
   // Format tweet date for display
   const formatTweetDate = (dateString: string): string => {
@@ -468,11 +495,15 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
 
   // Generate category info for tabs
   const categories: Record<string, CategoryInfo> = useMemo(() => {
+    // Count total tweets across all threads
+    const totalThreadTweets = threads.reduce((acc, thread) => acc + thread.tweets.length, 0);
+    const totalTweetCount = savedTweets.length + totalThreadTweets;
+    
     return {
       all: {
         label: 'All Tweets',
         icon: <Rows3 className="h-4 w-4" />,
-        count: savedTweets.length + (directThreads.reduce((acc, thread) => acc + thread.tweets.length, 0))
+        count: totalTweetCount
       },
       normal: {
         label: 'Normal',
@@ -490,7 +521,7 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
         count: threads.length // Count number of threads, not tweets in threads
       }
     };
-  }, [savedTweets, normalTweets, longTweets, threads, directThreads]);
+  }, [savedTweets, normalTweets, longTweets, threads]);
 
   // Debug logging - remove in production
   useEffect(() => {
@@ -535,7 +566,8 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
                 @{userParam}
               </h2>
               <p className="text-sm sm:text-base text-muted-foreground">
-                {savedTweets.length} saved {savedTweets.length === 1 ? 'tweet' : 'tweets'}
+                {categories.all.count} saved {categories.all.count === 1 ? 'tweet' : 'tweets'} 
+                {threads.length > 0 && ` (${threads.length} ${threads.length === 1 ? 'thread' : 'threads'})`}
               </p>
             </div>
           </div>
@@ -608,67 +640,13 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {activeCategory === 'all' ? (
-                      // For 'all' category, display all tweets in chronological order
-                      displayTweets.map(tweet => {
-                        // Check if this tweet is part of a thread
-                        const thread = threads.find(t => t.tweets.some(threadTweet => threadTweet.id === tweet.id));
-                        
-                        if (thread) {
-                          // If it's the first tweet of a thread, render the entire thread
-                          if (thread.tweets[0].id === tweet.id) {
-                            return (
-                              <div key={thread.id} className="relative group mb-4">
-                                <TweetThread 
-                                  thread={thread} 
-                                  selectedTweets={new Set()} 
-                                  onSelectToggle={() => {}} 
-                                  onSelectThread={() => {}}
-                                />
-                                <Button
-                                  className="absolute top-2 right-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                                  size="icon"
-                                  variant="destructive"
-                                  onClick={() => handleDeleteThread(thread)}
-                                  disabled={thread.tweets.some(tweet => isDeleting[tweet.id])}
-                                >
-                                  {thread.tweets.some(tweet => isDeleting[tweet.id]) ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <Trash2 className="h-4 w-4" />
-                                  )}
-                                </Button>
-                              </div>
-                            );
-                          }
-                          // Skip other tweets in the thread as they'll be rendered with the thread
-                          return null;
-                        } else {
-                          // Render individual tweet
-                          return (
-                            <div key={tweet.id} className="relative group mb-4">
-                              <TweetCard tweet={tweet} onSelectToggle={() => {}} isSelected={false} />
-                              <Button
-                                className="absolute top-2 right-2 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                                size="icon"
-                                variant="destructive"
-                                onClick={() => handleDeleteTweet(tweet.id)}
-                                disabled={isDeleting[tweet.id]}
-                              >
-                                {isDeleting[tweet.id] ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="h-4 w-4" />
-                                )}
-                              </Button>
-                            </div>
-                          );
-                        }
-                      }).filter(Boolean)
-                    ) : (
-                      // For other categories, maintain the original display logic
-                      <>
-                        {activeCategory === 'thread' && displayThreads.map(thread => (
+                    {/* Always show threads first, for all categories except when specifically filtering for non-thread tweets */}
+                    {(activeCategory === 'all' || activeCategory === 'thread') && displayThreads.length > 0 && (
+                      <div className="mb-4">
+                        {activeCategory === 'all' && displayThreads.length > 0 && (
+                          <h3 className="text-lg font-medium mb-3">Thread Tweets</h3>
+                        )}
+                        {displayThreads.map(thread => (
                           <div key={thread.id} className="relative group mb-4">
                             <TweetThread 
                               thread={thread} 
@@ -691,8 +669,16 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
                             </Button>
                           </div>
                         ))}
-                        
-                        {activeCategory !== 'thread' && displayTweets.map(tweet => (
+                      </div>
+                    )}
+                    
+                    {/* Display individual tweets if any */}
+                    {displayTweets.length > 0 && (
+                      <div>
+                        {activeCategory === 'all' && displayThreads.length > 0 && (
+                          <h3 className="text-lg font-medium mb-3">Individual Tweets</h3>
+                        )}
+                        {displayTweets.map(tweet => (
                           <div key={tweet.id} className="relative group mb-4">
                             <TweetCard tweet={tweet} onSelectToggle={() => {}} isSelected={false} />
                             <Button
@@ -710,7 +696,7 @@ const SavedTweets: React.FC<SavedTweetsProps> = ({ username }) => {
                             </Button>
                           </div>
                         ))}
-                      </>
+                      </div>
                     )}
                   </div>
                 )}

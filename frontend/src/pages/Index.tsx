@@ -4,10 +4,11 @@ import TweetCard from '@/components/TweetCard';
 import TweetThread from '@/components/TweetThread';
 import TweetCategories from '@/components/TweetCategories';
 import TweetPagination from '@/components/TweetPagination';
+import TweetFetchSettings from '@/components/TweetFetchSettings';
 import { Button } from '@/components/ui/button';
 import { fetchUserTweets, groupThreads, saveSelectedTweets } from '@/utils/api';
 import { Tweet, Thread, TweetCategory, PaginationState } from '@/utils/types';
-import { CheckCircle, Save, Loader2, CheckSquare, X, User } from 'lucide-react';
+import { CheckCircle, Save, Loader2, CheckSquare, X, User, RefreshCw } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useNavigate } from 'react-router-dom';
 import { Input } from '@/components/ui/input';
@@ -35,6 +36,8 @@ const Index = () => {
     totalItems: 0,
     itemsPerPage: 10
   });
+  const [isFetchingMore, setIsFetchingMore] = useState(false);
+  const [fetchedTweetCount, setFetchedTweetCount] = useState(0);
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -108,10 +111,30 @@ const Index = () => {
 
   // Update displayed items when filteredItems or pagination changes
   useEffect(() => {
+    // Ensure we have items to display
+    if (filteredItems.length === 0) {
+      console.log("No filtered items to display");
+      setDisplayedItems([]);
+      return;
+    }
+    
     // Calculate start and end indices based on current page
     const startIndex = (pagination.currentPage - 1) * pagination.itemsPerPage;
     const endIndex = startIndex + pagination.itemsPerPage;
     const itemsToDisplay = filteredItems.slice(startIndex, endIndex);
+    
+    console.log(`Updating displayed items: page ${pagination.currentPage}, showing items ${startIndex}-${endIndex} of ${filteredItems.length}`);
+    
+    if (itemsToDisplay.length === 0 && filteredItems.length > 0 && pagination.currentPage > 1) {
+      // If we're on a page with no items but have filtered items, go back to page 1
+      console.log("No items on current page, resetting to page 1");
+      setPagination(prev => ({
+        ...prev,
+        currentPage: 1
+      }));
+      return;
+    }
+    
     setDisplayedItems(itemsToDisplay);
     
     // Count how many actual tweets we're displaying
@@ -125,6 +148,16 @@ const Index = () => {
     });
     
     console.log(`Displaying ${itemsToDisplay.length} items on page ${pagination.currentPage} (${displayedTweetCount} tweets)`);
+    
+    // Log sample of first item for debugging
+    if (itemsToDisplay.length > 0) {
+      const firstItem = itemsToDisplay[0];
+      if ('tweets' in firstItem) {
+        console.log("First displayed item is a thread with", firstItem.tweets.length, "tweets");
+      } else {
+        console.log("First displayed item is a tweet with id", firstItem.id);
+      }
+    }
     
     setPagination(prev => ({
       ...prev,
@@ -171,6 +204,7 @@ const Index = () => {
     setSelectedTweets(new Set());
     setCurrentUser(username);
     setSelectedCategory('all');
+    setFetchedTweetCount(0);
     setPagination({
       currentPage: 1,
       totalItems: 0,
@@ -178,17 +212,30 @@ const Index = () => {
     });
     
     try {
+      console.log(`Starting tweet fetch for ${username}...`);
       const tweets = await fetchUserTweets(username);
       console.log(`Received ${tweets.length} tweets from API call`);
+      setFetchedTweetCount(tweets.length);
       
       if (tweets.length === 0) {
         toast({
           title: 'No tweets found',
           description: `We couldn't find any tweets for @${username}`,
         });
+        setIsLoading(false);
         return;
       }
       
+      // Log a sample of tweets to debug
+      if (tweets.length > 0) {
+        console.log("Sample of first tweet:", {
+          id: tweets[0].id,
+          text: tweets[0].text?.substring(0, 50) + '...',
+          author: tweets[0].author?.username
+        });
+      }
+      
+      console.log("Grouping tweets into threads...");
       const groupedItems = groupThreads(tweets);
       console.log(`After grouping, we have ${groupedItems.length} items (threads + individual tweets)`);
       
@@ -203,26 +250,38 @@ const Index = () => {
       });
       
       console.log(`Total tweet count across all items: ${totalTweetCount}`);
-      setAllItems(groupedItems);
       
-      // Update pagination with the correct total items
-      setPagination(prev => ({
-        ...prev,
-        totalItems: groupedItems.length
-      }));
-      
-      toast({
-        title: 'Tweets loaded',
-        description: `Fetched ${tweets.length} tweets from @${username}`,
-      });
+      // Explicitly set the items in state with a timeout to ensure UI updates
+      setTimeout(() => {
+        setAllItems(groupedItems);
+        
+        // Ensure first page of items is displayed
+        const firstPageItems = groupedItems.slice(0, pagination.itemsPerPage);
+        setDisplayedItems(firstPageItems);
+        
+        // Update pagination with the correct total items
+        setPagination(prev => ({
+          ...prev,
+          currentPage: 1,
+          totalItems: groupedItems.length
+        }));
+        
+        console.log(`Set ${firstPageItems.length} items to display`);
+        
+        toast({
+          title: 'Tweets loaded',
+          description: `Fetched ${tweets.length} tweets from @${username}`,
+        });
+        
+        setIsLoading(false);
+      }, 500);
     } catch (error) {
-      console.error('Error in search handler:', error);
+      console.error('Error fetching tweets:', error);
       toast({
         title: 'Error',
-        description: 'Something went wrong while fetching tweets',
+        description: 'Failed to fetch tweets. Please try again.',
         variant: 'destructive',
       });
-    } finally {
       setIsLoading(false);
     }
   };
@@ -371,6 +430,81 @@ const Index = () => {
     }
   });
 
+  // Add function to handle fetching more tweets
+  const handleFetchMore = async (count: number) => {
+    if (!currentUser) {
+      toast({
+        title: 'No user selected',
+        description: 'Please search for a user first',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsFetchingMore(true);
+    
+    try {
+      console.log(`Fetching ${count} more tweets for ${currentUser}...`);
+      
+      // Pass specific options to indicate we want to fetch more
+      const existingTweets = allItems.flatMap(item => 
+        'tweets' in item ? item.tweets : [item]
+      );
+      
+      const additionalTweets = await fetchUserTweets(currentUser, {
+        initialFetch: count,
+        maxTweets: fetchedTweetCount + count
+      });
+      
+      // Filter out tweets we already have
+      const existingIds = new Set(existingTweets.map(t => t.id));
+      const newTweets = additionalTweets.filter(tweet => !existingIds.has(tweet.id));
+      
+      console.log(`Got ${newTweets.length} new tweets out of ${additionalTweets.length} total`);
+      
+      if (newTweets.length === 0) {
+        toast({
+          title: 'No new tweets',
+          description: 'No additional tweets were found',
+        });
+        setIsFetchingMore(false);
+        return;
+      }
+      
+      // Combine existing and new tweets, then regroup
+      const combinedTweets = [...existingTweets, ...newTweets];
+      setFetchedTweetCount(combinedTweets.length);
+      
+      console.log(`Combined ${combinedTweets.length} tweets, regrouping...`);
+      const regroupedItems = groupThreads(combinedTweets);
+      
+      setAllItems(regroupedItems);
+      
+      toast({
+        title: 'Tweets fetched',
+        description: `Added ${newTweets.length} new tweets`,
+      });
+    } catch (error) {
+      console.error('Error fetching more tweets:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch more tweets. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsFetchingMore(false);
+    }
+  };
+  
+  // Add function to refresh tweets for current user
+  const handleRefresh = () => {
+    if (currentUser) {
+      // Clear session storage to force a fresh fetch
+      sessionStorage.removeItem(SESSION_ITEMS_KEY);
+      handleSearch(currentUser);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
       <div className="max-w-3xl mx-auto px-4 py-6 sm:py-12">
@@ -383,12 +517,55 @@ const Index = () => {
         
         <Search onSearch={handleSearch} isLoading={isLoading} />
         
+        {currentUser && (
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-2">
+            <div>
+              <h2 className="text-lg font-bold mb-1">
+                <User className="inline-block mr-2 h-5 w-5" />
+                @{currentUser}
+              </h2>
+              <div className="text-sm text-muted-foreground">
+                Found {fetchedTweetCount} tweets
+              </div>
+            </div>
+            
+            <TweetFetchSettings
+              onFetchMore={handleFetchMore}
+              onRefresh={handleRefresh}
+              isFetching={isLoading || isFetchingMore}
+            />
+          </div>
+        )}
+        
         {allItems.length > 0 && !isLoading && (
           <TweetCategories 
             selectedCategory={selectedCategory}
             onCategoryChange={setSelectedCategory}
             tweetCounts={categoryTweetCounts}
           />
+        )}
+        
+        {/* Debug options for when tweets are loaded but not displaying */}
+        {allItems.length > 0 && filteredItems.length > 0 && displayedItems.length === 0 && (
+          <div className="flex justify-center my-4">
+            <Button 
+              variant="outline" 
+              size="sm"
+              className="text-xs"
+              onClick={() => {
+                // Force re-render first page
+                const firstPageItems = filteredItems.slice(0, pagination.itemsPerPage);
+                setDisplayedItems(firstPageItems);
+                setPagination(prev => ({
+                  ...prev,
+                  currentPage: 1
+                }));
+                console.log(`Manually refreshed display with ${firstPageItems.length} items`);
+              }}
+            >
+              <RefreshCw className="h-3 w-3 mr-1" /> Refresh Display
+            </Button>
+          </div>
         )}
         
         {selectedTweets.size > 0 && (
@@ -446,11 +623,15 @@ const Index = () => {
             </div>
           </div>
         ) : currentUser && allItems.length === 0 ? (
-          <div className="text-center py-20">
-            <p className="text-muted-foreground">No tweets found for @{currentUser}</p>
+          <div className="text-center py-10">
+            <p className="text-muted-foreground mb-4">No tweets found for @{currentUser}</p>
+            
+            <Button onClick={() => handleSearch(currentUser)} variant="outline" className="mx-auto">
+              Try Again
+            </Button>
           </div>
         ) : filteredItems.length === 0 && allItems.length > 0 ? (
-          <div className="text-center py-20">
+          <div className="text-center py-10">
             <p className="text-muted-foreground">No {selectedCategory} tweets found.</p>
             <Button 
               onClick={() => setSelectedCategory('all')} 
@@ -459,6 +640,32 @@ const Index = () => {
             >
               Show all tweets
             </Button>
+          </div>
+        ) : displayedItems.length === 0 && filteredItems.length > 0 ? (
+          <div className="text-center py-10 border rounded-lg p-4">
+            <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4 text-twitter" />
+            <p className="text-muted-foreground mb-2">
+              {filteredItems.length} tweets found but none are displaying. This is a technical issue.
+            </p>
+            <div className="flex justify-center gap-2 mt-4">
+              <Button 
+                onClick={() => {
+                  // Force re-render first page
+                  const firstPageItems = filteredItems.slice(0, pagination.itemsPerPage);
+                  setDisplayedItems(firstPageItems);
+                  console.log(`Manually set ${firstPageItems.length} items to display`);
+                }} 
+                variant="outline"
+              >
+                Fix Display
+              </Button>
+              <Button 
+                onClick={() => handleSearch(currentUser)} 
+                variant="default"
+              >
+                Reload Tweets
+              </Button>
+            </div>
           </div>
         ) : (
           <>

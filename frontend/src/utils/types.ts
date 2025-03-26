@@ -21,6 +21,7 @@ export interface Tweet {
   is_quoted?: boolean;
   is_retweet?: boolean;
   is_reply?: boolean;
+  is_self_thread?: boolean;
   reply_count?: number;
   retweet_count?: number;
   favorite_count?: number;
