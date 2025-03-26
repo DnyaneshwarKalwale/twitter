@@ -33,6 +33,17 @@ export interface Tweet {
   has_media?: boolean;
   savedAt?: Date | string;
   savedBy?: string;
+  referenced_tweets?: {
+    type: string;
+    id: string;
+    text: string;
+    author?: {
+      name: string;
+      username: string;
+      profile_image_url: string;
+    };
+    media?: Media[];
+  }[];
 }
 
 export interface Media {
