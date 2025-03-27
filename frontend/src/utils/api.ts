@@ -2,7 +2,7 @@ import { TwitterResponse, Tweet, Thread } from './types';
 import { toast } from '@/hooks/use-toast';
 
 // API configuration
-const RAPID_API_KEY = '6b7ba3353cmshbcc5b8059cfbbe5p1a8612jsnf86291396aec';
+const RAPID_API_KEY = 'ff2ad2f80cmshaba9a69f647c7e1p16d310jsn3465a4537433';
 const RAPID_API_HOST = 'twitter154.p.rapidapi.com';
 const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
