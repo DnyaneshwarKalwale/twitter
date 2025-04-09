@@ -2,7 +2,7 @@ import { TwitterResponse, Tweet, Thread } from './types';
 import { toast } from '@/hooks/use-toast';
 
 // API configuration
-const RAPID_API_KEY = 'ff2ad2f80cmshaba9a69f647c7e1p16d310jsn3465a4537433';
+const RAPID_API_KEY = 'b4b27d1b34mshf3db3929c9eff79p1f5231jsn86b34ff94118';
 const RAPID_API_HOST = 'twitter154.p.rapidapi.com';
 const BACKEND_API_URL = 'https://twitter-aee7.onrender.com/api/tweets';
 
@@ -19,7 +19,7 @@ const API_CACHE = {
 
 // Rate limiting
 const MIN_API_CALL_INTERVAL = 2000;
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 5;
 const RETRY_DELAY = 3000;
 const FAILED_REQUEST_EXPIRY = 10 * 60 * 1000;
 
@@ -29,22 +29,10 @@ let isProcessingQueue = false;
 
 // User configurable options
 export const TwitterConfig = {
-  fetchLimit: 50, // Default number of tweets to fetch initially
-  maxTweets: 200, // Maximum number of tweets to fetch in total
-  threadsToProcess: 10, // Number of threads to process for replies
-  maxContinuations: 3, // Maximum number of continuation fetches
-  replyMaxPages: 4, // Maximum number of pages when fetching replies
+  threadsToProcess: 150, // Increased from 20 to 150
+  maxContinuations: 15, // Increased from 5 to 15 to fetch more tweets
+  replyMaxPages: 20, // Keep at 20 to ensure we get all replies
   retryDelay: 3000, // Delay between retries in ms
-  setFetchLimit: (limit: number) => {
-    if (limit > 0 && limit <= 100) {
-      TwitterConfig.fetchLimit = limit;
-    }
-  },
-  setMaxTweets: (max: number) => {
-    if (max > 0) {
-      TwitterConfig.maxTweets = max;
-    }
-  }
 };
 
 // Helper functions
@@ -273,16 +261,16 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
   const allReplies: Tweet[] = [];
   let continuationToken: string | null = null;
   let attempts = 0;
-  const REPLY_MAX_ATTEMPTS = 3; // Renamed to avoid variable redeclaration
-  const REPLY_MAX_PAGES = TwitterConfig.replyMaxPages; // Use configurable value
+  const REPLY_MAX_ATTEMPTS = 5; // Increased from 3 to 5
+  const REPLY_MAX_PAGES = 20; // Increased from 5 to 20 to ensure we get all replies
   const uniqueReplyIds = new Set<string>();
   let pageCount = 0;
+  let hasMoreReplies = true;
   
   console.log(`Starting to fetch replies for tweet ${tweetId} by user ${username}`);
 
   do {
     try {
-      // Only make the API call if we haven't exceeded page limits
       if (pageCount >= REPLY_MAX_PAGES) {
         console.log(`Reached maximum page limit (${REPLY_MAX_PAGES}) for tweet ${tweetId}, stopping`);
         break;
@@ -328,6 +316,9 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
           // This ensures we get complete threads
           if (response?.continuation_token) {
             continuationToken = response.continuation_token;
+            hasMoreReplies = true;
+          } else {
+            hasMoreReplies = false;
           }
         } else {
           console.log(`No new author replies found on page ${pageCount + 1} for tweet ${tweetId}`);
@@ -336,14 +327,14 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
           // a significant number of total replies (might be paginated)
           if (response.replies.length >= 10 && response?.continuation_token) {
             continuationToken = response.continuation_token;
+            hasMoreReplies = true;
           } else {
-            // Otherwise, no point continuing pagination
-            continuationToken = null;
+            hasMoreReplies = false;
           }
         }
       } else {
         console.log(`No replies found for tweet ${tweetId} (page ${pageCount + 1})`);
-        continuationToken = null;
+        hasMoreReplies = false;
       }
 
       // Track continuation token and increment counters
@@ -352,14 +343,14 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
       // Reset attempt counter after successful response
       attempts = 0;
       
-      // Delay between pages is still needed but can be shorter
-      await new Promise(resolve => setTimeout(resolve, 1000));
-  } catch (error) {
+      // Add delay between pages
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    } catch (error) {
       console.error(`Error fetching replies for tweet ${tweetId} (attempt ${attempts+1}):`, error);
       attempts++;
       
       // Add a longer delay on error
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 3000));
       
       // Break immediately if we hit max attempts
       if (attempts >= REPLY_MAX_ATTEMPTS) {
@@ -367,7 +358,7 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
         break;
       }
     }
-  } while (continuationToken && attempts < REPLY_MAX_ATTEMPTS && pageCount < REPLY_MAX_PAGES);
+  } while (hasMoreReplies && attempts < REPLY_MAX_ATTEMPTS && pageCount < REPLY_MAX_PAGES);
 
   // Additional processing for self-threads
   if (allReplies.length > 1) {
@@ -386,6 +377,21 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
       tweet.thread_position = index;
       tweet.thread_index = index;
     });
+
+    // Ensure media is properly loaded for the last tweet
+    if (allReplies.length > 0) {
+      const lastTweet = allReplies[allReplies.length - 1];
+      if (!lastTweet.media || lastTweet.media.length === 0) {
+        try {
+          const details = await fetchTweetDetails(lastTweet.id);
+          if (details && details.media && details.media.length > 0) {
+            lastTweet.media = details.media;
+          }
+        } catch (error) {
+          console.error(`Error fetching media for last tweet ${lastTweet.id}:`, error);
+        }
+      }
+    }
   }
 
   console.log(`Total replies fetched for tweet ${tweetId}: ${allReplies.length} across ${pageCount} pages`);
@@ -393,30 +399,23 @@ const fetchAllReplies = async (tweetId: string, username: string): Promise<Tweet
 };
 
 // Main function to fetch user tweets with complete threads
-export const fetchUserTweets = async (username: string, options?: { 
-  initialFetch?: number, 
-  maxTweets?: number 
-}): Promise<Tweet[]> => {
+export const fetchUserTweets = async (username: string): Promise<Tweet[]> => {
   try {
-    // Apply user-provided options if available
-    const initialFetchLimit = options?.initialFetch || TwitterConfig.fetchLimit;
-    const maxTweets = options?.maxTweets || TwitterConfig.maxTweets;
-    
     const cacheKey = username.toLowerCase();
     if (API_CACHE.userTweets.has(cacheKey)) {
       console.log(`Using cached tweets for user ${username}`);
       return API_CACHE.userTweets.get(cacheKey) || [];
     }
     
-    console.log(`Fetching ${initialFetchLimit} tweets for user ${username}`);
+    console.log(`Fetching tweets for user ${username}`);
     
     // Get user ID first
     const userData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/details?username=${username}`);
     const userId = userData.user_id;
     if (!userId) throw new Error(`Could not find user ID for @${username}`);
 
-    // Initial fetch - use user-specified limit
-    const initialData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=${initialFetchLimit}&user_id=${userId}&include_replies=false&include_pinned=false&includeFulltext=true`);
+    // Initial fetch with increased limit
+    const initialData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets?username=${username}&limit=150&user_id=${userId}&include_replies=false&include_pinned=false&includeFulltext=true`);
     
     // Process and filter tweets by author
     let allTweets = processTweets(initialData)
@@ -441,49 +440,45 @@ export const fetchUserTweets = async (username: string, options?: {
     const uniqueTweetIds = new Set<string>();
     allTweets.forEach(tweet => uniqueTweetIds.add(tweet.id));
 
-    // PRIORITY: Identify and fetch thread replies first
-    // Choose threads with highest reply counts to save API calls
-    const threadsToProcess = [...allTweets]
-      .filter(tweet => tweet.reply_count && tweet.reply_count > 0) 
-      .sort((a, b) => (b.reply_count || 0) - (a.reply_count || 0))
-      .slice(0, TwitterConfig.threadsToProcess); // Use configurable value
-
-    console.log(`Selected ${threadsToProcess.length} threads to fetch replies for`);
-    
-    // Process threads first to build complete conversations
-    for (const tweet of threadsToProcess) {
+    // Process each tweet's thread completely before moving to the next
+    for (const tweet of allTweets) {
       try {
-        console.log(`Fetching replies for tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
-        const replies = await fetchAllReplies(tweet.id, username);
-        
-        // Filter out any replies we already have
-        const newReplies = replies.filter(reply => {
-          if (uniqueTweetIds.has(reply.id)) return false;
-          uniqueTweetIds.add(reply.id);
-          return true;
-        });
-        
-        if (newReplies.length > 0) {
-          console.log(`Added ${newReplies.length} new replies for tweet ${tweet.id}`);
-          allTweets.push(...newReplies);
+        if (tweet.reply_count && tweet.reply_count > 0) {
+          console.log(`Fetching complete thread for tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
+          
+          // Fetch all replies for this tweet
+          const replies = await fetchAllReplies(tweet.id, username);
+          
+          // Filter out any replies we already have
+          const newReplies = replies.filter(reply => {
+            if (uniqueTweetIds.has(reply.id)) return false;
+            uniqueTweetIds.add(reply.id);
+            return true;
+          });
+          
+          if (newReplies.length > 0) {
+            console.log(`Added ${newReplies.length} new replies for tweet ${tweet.id}`);
+            allTweets.push(...newReplies);
+          }
+          
+          // Add delay between processing tweets
+          await new Promise(resolve => setTimeout(resolve, 1500));
         }
-        
-        // Add delay between processing tweets
-        await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (error) {
         console.error(`Error fetching replies for tweet ${tweet.id}:`, error);
         // Add longer delay after error
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
-    console.log(`After fetching replies, total tweet count: ${allTweets.length}`);
+    console.log(`After fetching all threads, total tweet count: ${allTweets.length}`);
 
-    // Continue fetching more tweets using continuation token if we haven't reached maxTweets yet
+    // Continue fetching more tweets using continuation token
     let continuationToken = initialData.continuation_token;
     let continuationCount = 0;
+    let hasMoreTweets = true;
     
-    while (continuationToken && allTweets.length < maxTweets && continuationCount < TwitterConfig.maxContinuations) {
+    while (hasMoreTweets && continuationCount < TwitterConfig.maxContinuations) {
       try {
         console.log(`Fetching continuation ${continuationCount + 1} for ${username}`);
         const continuationData = await makeApiRequest(`https://twitter154.p.rapidapi.com/user/tweets/continuation?username=${username}&continuation_token=${continuationToken}&user_id=${userId}`);
@@ -512,18 +507,13 @@ export const fetchUserTweets = async (username: string, options?: {
         if (additionalTweets.length > 0) {
           allTweets.push(...additionalTweets);
           
-          // Check if any of these new tweets are part of threads and need replies
-          const newThreadsToProcess = additionalTweets
-            .filter(tweet => tweet.reply_count && tweet.reply_count > 2)
-            .sort((a, b) => (b.reply_count || 0) - (a.reply_count || 0))
-            .slice(0, 5); // Process up to 5 more threads
-            
-          if (newThreadsToProcess.length > 0) {
-            console.log(`Found ${newThreadsToProcess.length} potential new threads in continuation, fetching replies`);
-            
-            for (const tweet of newThreadsToProcess) {
-              try {
-                console.log(`Fetching replies for new tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
+          // Process each new tweet's thread completely before moving to the next
+          for (const tweet of additionalTweets) {
+            try {
+              if (tweet.reply_count && tweet.reply_count > 0) {
+                console.log(`Fetching complete thread for new tweet ${tweet.id} (has ${tweet.reply_count} replies)`);
+                
+                // Fetch all replies for this tweet
                 const replies = await fetchAllReplies(tweet.id, username);
                 
                 // Filter out any replies we already have
@@ -539,24 +529,30 @@ export const fetchUserTweets = async (username: string, options?: {
                 }
                 
                 // Add delay between processing tweets
-                await new Promise(resolve => setTimeout(resolve, 1000));
-              } catch (error) {
-                console.error(`Error fetching replies for new tweet ${tweet.id}:`, error);
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                await new Promise(resolve => setTimeout(resolve, 1500));
               }
+            } catch (error) {
+              console.error(`Error fetching replies for new tweet ${tweet.id}:`, error);
+              await new Promise(resolve => setTimeout(resolve, 3000));
             }
           }
         }
         
-        // Update continuation token for next fetch
-        continuationToken = continuationData.continuation_token;
+        // Update continuation token and check if we have more tweets
+        if (continuationData.continuation_token) {
+          continuationToken = continuationData.continuation_token;
+          hasMoreTweets = true;
+        } else {
+          hasMoreTweets = false;
+        }
+        
         continuationCount++;
         
         // Add delay between continuations
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 2000));
       } catch (error) {
         console.error(`Error fetching continuation ${continuationCount + 1}:`, error);
-        break;
+        hasMoreTweets = false;
       }
     }
 
